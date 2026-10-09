@@ -8,7 +8,7 @@ class EmbStore:
     def __init__(self, model, feature="cover"):
         slug = model.replace("/", "_").replace(":", "_")
         self.dir = OUT / "emb" / slug / feature
-        self.dir.mkdir(parents=True, exist_ok=True)
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def _shards(self):
         return sorted(self.dir.glob("shard_*.json"))

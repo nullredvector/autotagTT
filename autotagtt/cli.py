@@ -1,12 +1,11 @@
-import argparse, json, random
-import numpy as np
-from .archive import OUT, load_groups
-from .embed import DEFAULT_MODEL, DEFAULT_PRETRAINED, embed_covers
+import argparse, json, os, random
+from .archive import OUT, DEFAULT_MODEL, DEFAULT_PRETRAINED, load_groups
 from .store import EmbStore
 from .train import train_tag, write_suggestions
 
 
 def main():
+    os.umask(0o077)   # everything we create is owner-only
     ap = argparse.ArgumentParser(prog="autotagtt")
     sub = ap.add_subparsers(dest="cmd")
     for name in ("embed", "train", "run", "montage"):
@@ -21,6 +20,7 @@ def main():
     tags = [t.strip().lower() for t in a.tags.split(",") if t.strip()]
 
     if cmd in ("embed", "run"):
+        from .embed import embed_covers
         embed_covers(a.model, a.pretrained, limit=getattr(a, "limit", None))
         if cmd == "embed":
             return
@@ -28,7 +28,7 @@ def main():
     ids, X = store.load()
     if cmd in ("train", "run"):
         res = {t: train_tag(t, ids, X, top=a.top) for t in tags}
-        write_suggestions(res, a.model)
+        write_suggestions(res, a.model, a.pretrained)
     if cmd == "montage":
         from .montage import make_montage
         sugg = json.loads((OUT / "autotag.json").read_text())

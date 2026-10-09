@@ -1,3 +1,16 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+# private data: never commit
+*.npy
+*.npz
+*.bak
+autotag.json
+autotag_feedback.json
+montage_*.jpg
+emb/
+.appdata/
+data/
+models/
+.env

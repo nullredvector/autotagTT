@@ -1,15 +1,11 @@
 import time
 import numpy as np
-import torch
 from PIL import Image
-from .archive import find_covers
+from .archive import find_covers, DEFAULT_MODEL, DEFAULT_PRETRAINED
 from .store import EmbStore
 
-DEFAULT_MODEL = "ViT-SO400M-14-SigLIP"
-DEFAULT_PRETRAINED = "webli"
 
-
-class CoverDS(torch.utils.data.Dataset):
+class CoverDS:
     def __init__(self, items, preprocess):
         self.items, self.pre = items, preprocess
 
@@ -42,6 +38,7 @@ def embed_covers(model=DEFAULT_MODEL, pretrained=DEFAULT_PRETRAINED, batch=256, 
     print(f"covers: {len(covers)} total, {len(done)} embedded, {len(todo)} to do", flush=True)
     if not todo:
         return store
+    import torch
     m, pre, _ = load_model(model, pretrained)
     t0, n = time.time(), 0
     for s in range(0, len(todo), shard):

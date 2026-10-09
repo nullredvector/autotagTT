@@ -2,11 +2,12 @@ import json, time
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 from .archive import OUT, APPDATA, load_groups, write_json_atomic
 
 FEEDBACK = APPDATA / "autotag_feedback.json"   # written by Starplayer: {tag: {accepted:[], rejected:[]}}
+DUP_SIM = 0.97                                  # cosine similarity treated as the same image
 
 
 def load_feedback(tag):
@@ -15,6 +16,29 @@ def load_feedback(tag):
     except Exception:
         fb = {}
     return set(fb.get("accepted", [])), set(fb.get("rejected", []))
+
+
+def dup_groups(X, thr=DUP_SIM, chunk=2048):
+    """Cluster near-duplicate embeddings (union-find) so CV folds never split them."""
+    n = len(X)
+    parent = np.arange(n)
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    Xf = X.astype(np.float32)
+    for s in range(0, n, chunk):
+        sims = Xf[s:s + chunk] @ Xf.T
+        for i, j in zip(*np.nonzero(sims > thr)):
+            i += s
+            if i < j:
+                a, b = find(i), find(j)
+                if a != b:
+                    parent[b] = a
+    return np.array([find(i) for i in range(n)])
 
 
 def _fit(X, y, w, C):
@@ -28,26 +52,45 @@ def _score(sc, clf, X):
     return clf.decision_function(sc.transform(X))
 
 
+def _boot_ci(ypos_sorted, fn, reps=200, seed=0):
+    """95% percentile bootstrap CI over positives/negatives resampled with replacement."""
+    rng = np.random.default_rng(seed)
+    n = len(ypos_sorted)
+    vals = []
+    for _ in range(reps):
+        idx = np.sort(rng.integers(0, n, n))   # resampling keeps rank order
+        vals.append(fn(ypos_sorted[idx]))
+    return [float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))]
+
+
 def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
+    if len(ids) == 0:
+        raise SystemExit("no embeddings; run `embed` first")
     X = X.astype(np.float32)
     groups = load_groups()
     if tag not in groups:
-        raise SystemExit(f"no group named {tag!r}; have {sorted(groups)[:20]}")
+        raise SystemExit("no group with that name in stars.json")
     accepted, rejected = load_feedback(tag)
-    pos_ids = groups[tag] | accepted
     idx = {v: i for i, v in enumerate(ids)}
+    pos_ids = groups[tag] | accepted
     y = np.array([1 if v in pos_ids else 0 for v in ids])
+    if y.sum() < folds:
+        raise SystemExit(f"only {int(y.sum())} embedded positives; need at least {folds}")
     w = np.ones(len(ids))
     for v in rejected:           # reviewed-and-rejected = confirmed negative, count more
-        if v in idx:
+        if v in idx and not y[idx[v]]:
             w[idx[v]] = 5.0
-    print(f"[{tag}] embedded={len(ids)} positives={y.sum()} rejected={len(rejected & set(idx))}", flush=True)
+    n_rej = len(rejected & set(idx))
+    print(f"[{tag}] embedded={len(ids)} positives={y.sum()} reviewed_rejected={n_rej}", flush=True)
 
-    skf = StratifiedKFold(folds, shuffle=True, random_state=seed)
+    grp = dup_groups(X)
+    print(f"  near-duplicate groups: {len(np.unique(grp))} for {len(ids)} images", flush=True)
+    skf = StratifiedGroupKFold(folds, shuffle=True, random_state=seed)
+    splits = list(skf.split(X, y, grp))
     best = None
     for C in cs:
         oof = np.zeros(len(ids))
-        for tr, te in skf.split(X, y):
+        for tr, te in splits:
             sc, clf = _fit(X[tr], y[tr], w[tr], C)
             oof[te] = _score(sc, clf, X[te])
         ap = average_precision_score(y, oof)
@@ -59,34 +102,43 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
     order = np.argsort(-oof)
     ypos = y[order]
     P = int(y.sum())
-    metrics = {"C": C, "ap": float(ap), "auc": float(roc_auc_score(y, oof)), "positives": P, "n": len(ids)}
-    # recall of known positives when reviewing only the top x% / top K of everything
+    # NOTE: "unlabeled" = not in the group. Many are probably true positives the user hasn't
+    # tagged, so every precision figure below is a LOWER bound on real precision.
+    metrics = {"C": C, "ap": float(ap), "ap_ci95": _boot_ci(ypos, lambda v: average_precision_score(v, -np.arange(len(v)))) if P else None,
+               "auc": float(roc_auc_score(y, oof)), "positives": P, "n": len(ids),
+               "reviewed_rejected": n_rej, "reviewed_accepted": len(accepted & set(idx))}
     for frac in (0.01, 0.02, 0.05, 0.10):
-        k = int(len(ids) * frac)
+        k = max(1, int(len(ids) * frac))
         metrics[f"recall@top{frac:.0%}"] = float(ypos[:k].sum() / P)
     for k in (50, 100, 200, 500):
-        metrics[f"labeled_precision@{k}"] = float(ypos[:k].mean())
+        if k <= len(ids):
+            metrics[f"known_precision@{k}"] = float(ypos[:k].mean())
     print("  " + json.dumps(metrics), flush=True)
 
-    sc, clf = _fit(X, y, w, C)
-    # Unlabeled items were training negatives in the final fit, so rank suggestions by
-    # out-of-fold score (each scored by a model that never saw it as a negative).
-    sugg = []
+    # Rank suggestions by out-of-fold score: each item is scored by a model that never trained on
+    # it (or its near-duplicates), so provisional-negative memorisation does not suppress it.
+    sugg, seen = [], set()
     for i in order:
         v = ids[i]
-        if y[i] or v in rejected:
+        if y[i] or v in rejected or v in seen:
             continue
+        seen.add(v)
         sugg.append({"id": v, "score": round(float(oof[i]), 4), "status": "pending"})
         if len(sugg) >= top:
             break
+    sc, clf = _fit(X, y, w, C)
     return {"suggestions": sugg, "metrics": metrics, "model": (sc, clf)}
 
 
-def write_suggestions(results, model_name):
+def write_suggestions(results, model_name, pretrained=None):
+    """score = logistic-regression decision value (log-odds on class-balanced data).
+    Higher = more similar to the tagged examples. NOT a calibrated probability."""
     path = OUT / "autotag.json"
-    out = {"_meta": {"model": model_name, "generated": time.strftime("%Y-%m-%dT%H:%M:%S")}}
+    out = {"_meta": {"model": model_name, "pretrained": pretrained,
+                     "generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     "score": "oof logistic decision value; uncalibrated"}}
     for tag, r in results.items():
         out[tag] = r["suggestions"]
         out["_meta"].setdefault("metrics", {})[tag] = r["metrics"]
-    write_json_atomic(path, out)
-    print(f"wrote {path}")
+    write_json_atomic(path, out, backup=True)
+    print(f"wrote {path.name}")

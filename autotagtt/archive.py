@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(os.environ.get("ARCHIVE_DIR", "/archive"))
 DATA = ROOT / "data"
 APPDATA = DATA / ".appdata"
+DEFAULT_MODEL, DEFAULT_PRETRAINED = "ViT-SO400M-14-SigLIP", "webli"
 OUT = APPDATA / "autotag"          # everything we write lives here (never stars.json/sessions.json)
 
 
@@ -20,7 +21,7 @@ def find_covers():
     out = {}
     for sub in sorted(DATA.glob("*/covers")) + sorted(DATA.glob("Following/*/covers")):
         for p in sub.iterdir():
-            if p.suffix.lower() == ".jpg":
+            if p.suffix.lower() in (".jpg", ".jpeg"):
                 out.setdefault(p.stem, p)
     return out
 
@@ -40,8 +41,13 @@ def load_groups():
     return {g["name"].strip().lower(): set(g["videoIds"]) for g in sj.get("groups", [])}
 
 
-def write_json_atomic(path, obj):
-    path.parent.mkdir(parents=True, exist_ok=True)
+def write_json_atomic(path, obj, backup=False):
+    """Atomic, owner-only write. backup=True keeps the previous file as <name>.bak."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, separators=(",", ":")))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(obj, f, separators=(",", ":"))
+    if backup and path.exists():
+        os.replace(path, path.with_suffix(path.suffix + ".bak"))
     os.replace(tmp, path)
