@@ -122,3 +122,16 @@ def test_suggestions_written_atomically_with_backup(arch):
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
     d = json.loads(out.read_text())
     assert len(d["braces"]) == 10 and "score" in d["_meta"]
+
+
+def test_unsure_is_excluded_from_training_and_suggestions(arch):
+    from autotagtt import train
+    ids, X, pos = make_data()
+    known = set(sorted(pos)[:45])
+    write_stars(arch, known)
+    first = train.train_tag("braces", ids, X, top=20)["suggestions"]
+    uns = [first[0]["id"], first[1]["id"]]
+    (arch / "data/.appdata/autotag_feedback.json").write_text(json.dumps({"braces": {"unsure": uns}}))
+    r = train.train_tag("braces", ids, X, top=300)
+    assert r["metrics"]["excluded_unsure"] == 2 and r["metrics"]["n"] == len(ids) - 2
+    assert not ({x["id"] for x in r["suggestions"]} & set(uns))

@@ -11,11 +11,12 @@ DUP_SIM = 0.97                                  # cosine similarity treated as t
 
 
 def load_feedback(tag):
+    """(accepted, rejected, unsure). Unsure = reviewed but undecided: left out of training entirely."""
     try:
         fb = json.loads(FEEDBACK.read_text()).get(tag, {})
     except Exception:
         fb = {}
-    return set(fb.get("accepted", [])), set(fb.get("rejected", []))
+    return set(fb.get("accepted", [])), set(fb.get("rejected", [])), set(fb.get("unsure", []))
 
 
 def dup_groups(X, thr=DUP_SIM, chunk=2048):
@@ -70,7 +71,12 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
     groups = load_groups()
     if tag not in groups:
         raise SystemExit("no group with that name in stars.json")
-    accepted, rejected = load_feedback(tag)
+    accepted, rejected, unsure = load_feedback(tag)
+    unsure -= groups[tag] | accepted | rejected      # an explicit label always wins over "not sure"
+    n_unsure = len(unsure & set(ids))
+    if n_unsure:
+        keep = [i for i, v in enumerate(ids) if v not in unsure]
+        ids, X = [ids[i] for i in keep], X[keep]
     idx = {v: i for i, v in enumerate(ids)}
     pos_ids = groups[tag] | accepted
     y = np.array([1 if v in pos_ids else 0 for v in ids])
@@ -106,7 +112,7 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
     # tagged, so every precision figure below is a LOWER bound on real precision.
     metrics = {"C": C, "ap": float(ap), "ap_ci95": _boot_ci(ypos, lambda v: average_precision_score(v, -np.arange(len(v)))) if P else None,
                "auc": float(roc_auc_score(y, oof)), "positives": P, "n": len(ids),
-               "reviewed_rejected": n_rej, "reviewed_accepted": len(accepted & set(idx))}
+               "reviewed_rejected": n_rej, "excluded_unsure": n_unsure, "reviewed_accepted": len(accepted & set(idx))}
     for frac in (0.01, 0.02, 0.05, 0.10):
         k = max(1, int(len(ids) * frac))
         metrics[f"recall@top{frac:.0%}"] = float(ypos[:k].sum() / P)
