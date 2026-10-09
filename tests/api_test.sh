@@ -26,7 +26,13 @@ chk "same-origin ok" "$(post '{"tag":"braces","id":"'$ID3'","decision":"rejected
 chk "oversize body -> 413" "$(post "$(python3 -c 'print("{\"x\":\""+"a"*5000+"\"}")')")" 413
 chk "GET on feedback -> 405" "$(curl -s -o /dev/null -w '%{http_code}' $B/api/autotag/feedback)" 405
 chk "PUT on feedback -> 405" "$(curl -s -o /dev/null -w '%{http_code}' -X PUT $B/api/autotag/feedback)" 405
-chk "pending now 12" "$(curl -s "$B/api/autotag?tag=braces" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["pending"]),len(d["accepted"]),len(d["rejected"]))')" "12 1 1"
+chk "unsure ok" "$(post '{"tag":"braces","id":"7000000000000000012","decision":"unsure"}')" 200
+chk "unsure->accepted needs change" "$(post '{"tag":"braces","id":"7000000000000000012","decision":"accepted"}')" 409
+chk "unsure->rejected with change" "$(post '{"tag":"braces","id":"7000000000000000012","decision":"rejected","change":true}')" 200
+chk "rejected->unsure with change" "$(post '{"tag":"braces","id":"7000000000000000012","decision":"unsure","change":true}')" 200
+chk "unsure->pending with change" "$(post '{"tag":"braces","id":"7000000000000000012","decision":"pending","change":true}')" 200
+chk "unsure again (left set aside)" "$(post '{"tag":"braces","id":"7000000000000000012","decision":"unsure"}')" 200
+chk "pending now 12" "$(curl -s "$B/api/autotag?tag=braces" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["pending"]),len(d["accepted"]),len(d["rejected"]));assert len(d["unsure"])==1')" "11 1 1"
 chk "feedback file mode 600" "$(stat -f %Lp $A/data/.appdata/autotag_feedback.json 2>/dev/null || stat -c %a $A/data/.appdata/autotag_feedback.json)" 600
 chk "server never touched stars.json" "$(shasum $A/data/.appdata/stars.json)" "$STARS_BEFORE"
 exit $fail

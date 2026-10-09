@@ -24,3 +24,7 @@ python -m autotagtt montage               # contact sheets of top suggestions fo
 ## Tests
 `pip install numpy scikit-learn pillow pytest && pytest` — synthetic vectors/fake IDs only; no GPU, no archive.
 Real SigLIP inference has not been run yet.
+
+## Review decisions
+`accepted` → positive label, `rejected` → confirmed negative (weight 5), `unsure` → **no label**: the video is set aside in
+Starplayer, training ignores it, and it stays hidden from Pending until moved back.
