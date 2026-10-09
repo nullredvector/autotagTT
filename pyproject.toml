@@ -1,0 +1,12 @@
+[project]
+name = "autotagtt"
+version = "0.1.0"
+description = "Local ML auto-tag suggestions for the mTT archive"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pillow", "scikit-learn", "open_clip_torch", "torch"]
+
+[project.scripts]
+autotagtt = "autotagtt.cli:main"
+
+[tool.setuptools]
+packages = ["autotagtt"]

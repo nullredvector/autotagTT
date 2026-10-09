@@ -1,0 +1,17 @@
+# Batch job, not a service. Run on demand:  docker compose run --rm autotagtt run
+# Add to the Dockge stack next to starplayer (same archive volume).
+services:
+  autotagtt:
+    image: autotagtt:local          # later: ghcr.io/nullredvector/autotagtt:latest
+    runtime: nvidia
+    environment:
+      - ARCHIVE_DIR=/archive
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - /mnt/zion/enc/archive/Downloads/incomplete/content2/shorts:/archive
+      - autotagtt-models:/models    # HF model cache
+    shm_size: 2g
+    restart: "no"
+    command: ["run"]
+volumes:
+  autotagtt-models:
