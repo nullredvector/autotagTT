@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install numpy scikit-learn pillow pytest
-      - run: pytest -q          # synthetic data only; no GPU, no archive
+      - run: python -m pytest -q   # synthetic data only; no GPU, no archive
 
   build-and-push:
     needs: test
