@@ -83,5 +83,12 @@ chk "schedule: hour 24 -> 400" "$(sp '{"enabled":true,"hour":24}')" 400
 chk "schedule: non-bool -> 400" "$(sp '{"enabled":"yes","hour":3}')" 400
 chk "schedule: string hour -> 400" "$(sp '{"enabled":true,"hour":"3"}')" 400
 chk "schedule: cross-origin -> 403" "$(sp '{"enabled":true,"hour":3}' -H 'Origin: http://evil.example')" 403
-rm -f $AT/status.json $AT/run_request.json $AT/schedule.json
+# long silent job: status.json heartbeat is stale, but the worker's own heartbeat.json is fresh -> still online
+setst '{"state":"running","phase":"training","detail":"tag 3 of 11"}' 600
+chk "heartbeat: stale status alone -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False
+python3 -c "import json,time;json.dump({'t':time.time()},open('$AT/heartbeat.json','w'))"
+chk "heartbeat: fresh heartbeat.json -> online while running" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["workerOnline"],d["state"],d["detail"])')" "True running tag 3 of 11"
+python3 -c "import json,time;json.dump({'t':time.time()-300},open('$AT/heartbeat.json','w'))"
+chk "heartbeat: old heartbeat.json -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False
+rm -f $AT/status.json $AT/run_request.json $AT/schedule.json $AT/heartbeat.json
 exit $fail

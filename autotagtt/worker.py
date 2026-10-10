@@ -6,12 +6,13 @@ Files (all under data/.appdata/autotag/, owner-only):
   schedule.json     written by Starplayer  {"enabled": bool, "hour": 0-23}
   status.json       written here           state/phase/heartbeat/last result (read by Starplayer)
 The command is fixed in this file; nothing in the request files can change what is executed."""
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, threading, time
 from .archive import OUT, write_json_atomic
 
 REQUEST = OUT / "run_request.json"
 SCHEDULE = OUT / "schedule.json"
 STATUS = OUT / "status.json"
+HEARTBEAT = OUT / "heartbeat.json"   # written by its own thread, so a long silent job never looks like a dead worker
 LOG = OUT / "last_run.log"
 POLL = float(os.environ.get("AUTOTAGTT_POLL", "5"))
 JOB_TIMEOUT = float(os.environ.get("AUTOTAGTT_TIMEOUT", str(6 * 3600)))
@@ -47,6 +48,25 @@ def summarize():
     return out
 
 
+def heartbeat_loop(interval=10.0):
+    while True:
+        try:
+            write_json_atomic(HEARTBEAT, {"t": time.time()})
+        except Exception:
+            pass
+        time.sleep(interval)
+
+
+def track_progress(st, line, total):
+    """Tag counter from the job's anonymous log lines: 'tag N of M' while training."""
+    if "embedded=" in line:
+        st["_started"] = st.get("_started", 0) + 1
+    if line.startswith("ai tags:") or "skipped" in line:
+        st["_finished"] = st.get("_finished", 0) + 1
+    if st.get("phase") == "training" and total:
+        st["detail"] = "tag %d of %d" % (min(st.get("_started", 1) or 1, total), total)
+
+
 def phase_from_line(line, current):
     if line.startswith("covers:"):
         return "embedding"
@@ -57,7 +77,12 @@ def phase_from_line(line, current):
 
 def run_job(st, reason, request_id=None):
     """Runs the fixed job to completion; always leaves status in a final state."""
-    st.update(state="running", phase="starting", reason=reason, started=time.time(), error=None, detail="")
+    try:
+        from .archive import enabled_tags
+        total = len(enabled_tags())
+    except Exception:
+        total = 0
+    st.update(state="running", phase="starting", reason=reason, started=time.time(), error=None, detail="", _started=0, _finished=0)
     if request_id:
         st["last_request_id"] = request_id
     save_status(st)
@@ -74,6 +99,7 @@ def run_job(st, reason, request_id=None):
                 st["phase"] = phase_from_line(line, st["phase"])
                 if "img/s" in line:
                     st["detail"] = line.strip()      # progress lines carry no tag names
+                track_progress(st, line, total)
                 if time.time() - last > 3:
                     save_status(st); last = time.time()
                 if time.time() - t0 > JOB_TIMEOUT:
@@ -87,6 +113,7 @@ def run_job(st, reason, request_id=None):
         st.update(state="idle", phase="failed", error="timed out")
     except Exception:
         st.update(state="idle", phase="failed", error="job failed (exit code %s); see last_run.log" % code)
+    st.pop("_started", None); st.pop("_finished", None)
     st.update(finished=time.time(), detail="")
     save_status(st)
 
@@ -126,6 +153,7 @@ def main():
         st.update(state="idle", phase="failed", error="interrupted (worker restarted)", detail="")
     st.setdefault("state", "idle")
     save_status(st)
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     print("worker ready", flush=True)
     beat = 0.0
     while True:

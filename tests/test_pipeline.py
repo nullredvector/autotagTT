@@ -232,3 +232,19 @@ def test_worker_nightly_schedule_runs_once_per_day(wk):
     assert wk.tick(st, now + 2 * 86400) is False
     write_json_atomic(wk.SCHEDULE, {"enabled": True, "hour": 99})
     assert wk.tick(st, now + 3 * 86400) is False                  # invalid hour ignored
+
+
+def test_worker_progress_counter_and_heartbeat_file(wk):
+    st = {"phase": "training"}
+    for line in ["[tag-a] embedded=10 positives=3", "ai tags: mode=off cutoff=None count=0",
+                 "[tag-b] embedded=10 positives=3"]:
+        wk.track_progress(st, line, 11)
+    assert st["detail"] == "tag 2 of 11" and st["_finished"] == 1
+    st2 = {"phase": "embedding"}
+    wk.track_progress(st2, "  10/10  50 img/s", 11)
+    assert "detail" not in st2
+    wk.HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
+    import threading
+    threading.Thread(target=wk.heartbeat_loop, args=(0.05,), daemon=True).start()
+    import time as _t; _t.sleep(0.3)
+    assert json.loads(wk.HEARTBEAT.read_text())["t"] > _t.time() - 5
