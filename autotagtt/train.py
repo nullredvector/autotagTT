@@ -11,6 +11,7 @@ MIN_POSITIVES = 30                              # fewer reviewed/known positives
 MIN_AUC = 0.80                                  # weaker tags are reported but never shown or auto-tagged
 AI_PRECISION = 0.80                             # AI tags are applied only above the score where reviewed precision >= this
 AI_MIN_REVIEWED = 30
+AI_WINDOW = 50                                  # precision is judged on the most recent N reviewed videos going down the ranking
 AI_UNVALIDATED_TOP = 100                        # no usable reviews yet: only the top N per tag
 DUP_SIM = 0.97                                  # cosine similarity treated as the same image
 
@@ -152,17 +153,20 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
 
 def ai_tags(ids, oof, y, accepted, rejected, unsure):
     """Videos to label with an AI tag (never in a human group, never already reviewed).
-    Cutoff = lowest score s where reviewed precision of everything scoring >= s is still >= AI_PRECISION
-    (needs AI_MIN_REVIEWED decisions above it); without enough reviews only the top AI_UNVALIDATED_TOP."""
+    Walking down the ranking, the cutoff is the last reviewed video before the trailing-window precision
+    (last AI_WINDOW decisions) drops below AI_PRECISION; needs AI_MIN_REVIEWED decisions. Without enough
+    reviews only the top AI_UNVALIDATED_TOP are tagged."""
     order = np.argsort(-oof)
-    tp = n = 0
-    cutoff = None
+    recent, seen, cutoff = [], 0, None
     for i in order:
         v = ids[i]
         if v in accepted or v in rejected:
-            n += 1
-            tp += v in accepted
-            if n >= AI_MIN_REVIEWED and tp / n >= AI_PRECISION:
+            recent.append(v in accepted)
+            recent = recent[-AI_WINDOW:]
+            seen += 1
+            if seen >= AI_MIN_REVIEWED:
+                if sum(recent) / len(recent) < AI_PRECISION:
+                    break                      # precision of the latest decisions fell below target: stop here
                 cutoff = float(oof[i])
     mode = "reviewed"
     if cutoff is None:
