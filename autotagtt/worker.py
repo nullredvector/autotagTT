@@ -16,6 +16,8 @@ NOTIFY_TEST = OUT / "notify_test.json"   # written by Starplayer's "Send test no
 STATUS = OUT / "status.json"
 HEARTBEAT = OUT / "heartbeat.json"   # written by its own thread, so a long silent job never looks like a dead worker
 LOG = OUT / "last_run.log"
+THREADS = os.environ.get("AUTOTAGTT_THREADS", "8")     # CPU threads for the job (the box has other services)
+NICE = int(os.environ.get("AUTOTAGTT_NICE", "10"))     # run the job at lower CPU priority
 POLL = float(os.environ.get("AUTOTAGTT_POLL", "5"))
 JOB_TIMEOUT = float(os.environ.get("AUTOTAGTT_TIMEOUT", str(6 * 3600)))
 JOB_CMD = [sys.executable, "-m", "autotagtt", "run"]
@@ -38,6 +40,18 @@ def load_status():
 def save_status(st):
     st["heartbeat"] = time.time()
     write_json_atomic(STATUS, st)
+
+
+def frames_info():
+    """Frame-analysis progress and trial comparison (tag names appear only here, for Starplayer's UI)."""
+    out = {}
+    stats = _read(OUT / "frames_stats.json")
+    if isinstance(stats, dict):
+        out["stats"] = {k: stats.get(k) for k in ("done", "total", "rate", "mode", "ts")}
+    trial = _read(OUT / "frames_trial.json")
+    if isinstance(trial, dict):
+        out["trial"] = trial
+    return out
 
 
 def summarize():
@@ -72,6 +86,8 @@ def track_progress(st, line, total):
 def phase_from_line(line, current):
     if line.startswith("covers:"):
         return "embedding"
+    if line.startswith("frames:"):
+        return "frames"
     if "embedded=" in line:
         return "training"
     return current
@@ -93,13 +109,15 @@ def run_job(st, reason, request_id=None):
     try:
         with open(LOG, "w") as log:
             os.chmod(LOG, 0o600)
-            p = subprocess.Popen(JOB_CMD, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            env = dict(os.environ, OMP_NUM_THREADS=THREADS, OPENBLAS_NUM_THREADS=THREADS, MKL_NUM_THREADS=THREADS, AUTOTAGTT_THREADS=THREADS)
+            p = subprocess.Popen(JOB_CMD, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
+                                 preexec_fn=(lambda: os.nice(NICE)) if NICE else None)
             last = 0.0
             for line in p.stdout:
                 log.write(line); log.flush()
                 line = line.rstrip()
                 st["phase"] = phase_from_line(line, st["phase"])
-                if "img/s" in line:
+                if "img/s" in line or line.startswith("  frames "):
                     st["detail"] = line.strip()      # progress lines carry no tag names
                 track_progress(st, line, total)
                 if time.time() - last > 3:
@@ -110,13 +128,14 @@ def run_job(st, reason, request_id=None):
             code = p.wait()
         if code != 0:
             raise RuntimeError(code)
-        st.update(state="idle", phase="done", error=None, last_ok=time.time(), result=summarize())
+        st.update(state="idle", phase="done", error=None, last_ok=time.time(), result=summarize(),
+                  run_summary=_read(OUT / "run_summary.json"))
     except TimeoutError:
         st.update(state="idle", phase="failed", error="timed out")
     except Exception:
         st.update(state="idle", phase="failed", error="job failed (exit code %s); see last_run.log" % code)
     st.pop("_started", None); st.pop("_finished", None)
-    st.update(finished=time.time(), detail="")
+    st.update(finished=time.time(), detail="", frames=frames_info())
     save_status(st)
     try:
         notify.run_finished(st)

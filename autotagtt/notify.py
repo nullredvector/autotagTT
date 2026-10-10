@@ -53,6 +53,9 @@ def run_finished(st):
         notify("failed", "autotagTT: run failed", "The AI tagger run did not finish. Check the Run panel in Starplayer.",
                priority=4, tags=["warning"], dedupe_key="failed", dedupe_s=6 * 3600)
         return
+    summary = st.get("run_summary")
+    if st.get("reason") == "nightly" and isinstance(summary, dict) and summary.get("changed") is False:
+        return                                   # a quiet night: nothing new, nothing retrained, no message
     res = st.get("result") or {}
     ok = sum(1 for m in res.values() if m.get("gate") == "ok")
     weak = sum(1 for m in res.values() if m.get("gate") == "weak")

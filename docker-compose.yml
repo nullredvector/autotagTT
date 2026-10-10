@@ -13,6 +13,7 @@ services:
     environment:
       - ARCHIVE_DIR=/archive
       - NVIDIA_VISIBLE_DEVICES=all
+      # - AUTOTAGTT_THREADS=8        # CPU threads for training/frame extraction (the host has 16 cores)
       # - TZ=America/New_York         # the nightly schedule uses this container's local time
       # Push notifications (ntfy), same settings as ttpull. Leave NTFY_URL empty to disable. Messages carry counts only.
       - NTFY_URL=${NTFY_URL:-}

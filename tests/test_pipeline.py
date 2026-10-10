@@ -578,3 +578,61 @@ def test_frames_config_defaults_and_validation(arch, ff_mod):
     assert ff_mod.frames_config() == {"mode": "full", "mouth": True, "budget_min": 120}   # out-of-range budget falls back
     ff_mod.CONFIG.write_text(json.dumps({"mode": "everything"}))
     assert ff_mod.frames_config()["mode"] == "off"
+
+
+def test_worker_status_carries_frames_info_and_quiet_nights_do_not_notify(wk, nt, monkeypatch):
+    from autotagtt import worker
+    importlib.reload(worker)
+    notify, sent = nt
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example.com/t")
+    from autotagtt.archive import write_json_atomic
+    OUT = worker.OUT
+    write_json_atomic(OUT / "frames_stats.json", {"done": 10, "total": 100, "rate": 3.5, "mode": "trial", "ts": 1})
+    write_json_atomic(OUT / "frames_trial.json", {"x": {"n_pos": 20, "n": 200, "ap_cover": 0.2, "ap_frames": 0.5}})
+    write_json_atomic(OUT / "run_summary.json", {"changed": False, "new_covers": 0, "modes": {"reused": 3}})
+    write_json_atomic(worker.SCHEDULE, {"enabled": True, "hour": 0})
+    st = {}
+    assert worker.tick(st, now=__import__("time").mktime((2026, 10, 12, 4, 0, 0, 0, 0, -1))) is True
+    s = worker.load_status()
+    assert s["frames"]["stats"]["done"] == 10 and s["frames"]["trial"]["x"]["ap_frames"] == 0.5
+    assert s["run_summary"]["changed"] is False
+    assert sent == []                                     # nightly + nothing changed -> silent
+    write_json_atomic(worker.REQUEST, {"id": "m1", "ts": 1})
+    worker.tick(st)
+    assert len(sent) == 1                                 # a manual run always reports
+
+
+def test_run_orchestration_trial_then_full_then_reuse(ff_mod, arch, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    for m in ("autotagtt.archive", "autotagtt.store", "autotagtt.train", "autotagtt.cli"):
+        importlib.reload(importlib.import_module(m))
+    from autotagtt import cli, train, embed, archive
+    from autotagtt.store import EmbStore
+    monkeypatch.setattr(embed, "ImageEmbedder", lambda m, p: FakeEmbedder())
+    ids, X, pos = make_data(n=90, npos=45, d=32)
+    vdir = arch / "data/Likes/videos"; vdir.mkdir(parents=True)
+    for v in ids:
+        _make_video(ff_mod, vdir / f"{v}.mp4", 1)
+    write_stars(arch, set(sorted(pos)[:40]))
+    EmbStore("m", "cover").add(ids, X)
+    a = SimpleNamespace(model="m", pretrained="p", top=30)
+    out = archive.OUT
+
+    ff_mod.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    ff_mod.CONFIG.write_text(json.dumps({"mode": "trial", "mouth": False, "budget_min": 30}))
+    cover_ids, Xc = EmbStore("m", "cover").load()
+    cli._train_and_write(a, ["braces"], cover_ids, Xc, new_covers=90, with_frames=True)
+    summary = json.loads((out / "run_summary.json").read_text())
+    assert summary["changed"] is True and summary["modes"] == {"trained": 1}
+    assert json.loads((out / "frames_trial.json").read_text()) is not None and (out / "frames_stats.json").exists()
+    stats = json.loads((out / "frames_stats.json").read_text())
+    assert stats["done"] == 90 and stats["total"] == 90 and stats["mode"] == "trial"
+
+    ff_mod.CONFIG.write_text(json.dumps({"mode": "full", "mouth": False, "budget_min": 30}))
+    cli._train_and_write(a, ["braces"], cover_ids, Xc, new_covers=0, with_frames=True)
+    assert json.loads((out / "run_summary.json").read_text())["frames_used"] is True    # coverage is complete, frames are used
+    cli._train_and_write(a, ["braces"], cover_ids, Xc, new_covers=0, with_frames=True)
+    s3 = json.loads((out / "run_summary.json").read_text())
+    assert s3["changed"] is False and s3["modes"] == {"reused": 1}                       # a quiet night: nothing recomputed
+    ai = json.loads((out / "ai_tags.json").read_text())
+    assert "videos" in ai and stat.S_IMODE(os.stat(out / "autotag.json").st_mode) == 0o600

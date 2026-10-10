@@ -56,3 +56,30 @@ optional `NTFY_TOKEN`, `NOTIFY_EVENTS=done,failed`). A message is sent when a ru
 only (tags usable/too weak, suggestions to review, AI-tagged), never tag names, video IDs or paths. Use your own ntfy server if
 you don't want even those counts to reach a public one. Test from the Run panel ("Send test") or
 `docker exec <worker> python -m autotagtt notify-test`.
+
+## Operations
+
+### What a nightly run does now
+1. Embeds only new covers (and, if frame analysis is on, frames for new videos within the time budget).
+2. Duplicate grouping is computed once per run, not once per tag.
+3. Per tag, the saved scores + weights are reused when the labels (group, accepted, rejected, not-sure), the model and the feature set are unchanged;
+   new videos are scored with the saved weights (no retrain). A tag retrains when its labels change, when more than
+   max(200, 5%) videos were added, or when its cache is older than 14 days. A quiet night finishes in about a minute and sends no notification.
+4. The job runs at low CPU priority with `AUTOTAGTT_THREADS` threads (default 8), so other services keep their CPU.
+
+Per-tag caches live in `data/.appdata/autotag/cache/<hash>/` (hashed names, owner-only): delete the folder to force full retraining.
+
+### Frame analysis (Milestone 5), controlled from Starplayer's Run panel
+- **Off** (default). **Trial** reads frames for a sample (a few thousand videos: positives of each enabled tag plus random others) and shows,
+  per tag, cross-validated accuracy with and without frames; real outputs are unchanged. **Full** reads every video, in runs of up to N minutes
+  (resumes where it stopped; newest videos first). Switching back to Off stops it; cached frame embeddings are kept.
+- Frames are used for a tag only once 95% of videos are covered and only if they beat cover-only by at least 0.01 average precision in cross-validation.
+- Optional lower-face crops (OpenCV Haar cascade) are a third candidate feature set.
+- Frames are extracted with FFmpeg into a private temp dir per batch and deleted right after embedding. Only float16 embeddings are stored
+  (`emb/<model>/frames/`); videos that yield no frames twice are skipped from then on.
+
+### Update, disable, roll back
+- **Update:** push to `main`; CI publishes the image and Watchtower restarts the worker (do not push while a run is in progress: the run is lost and restarts from its last cached step).
+- **Disable the feature:** stop the worker container (Starplayer shows "worker offline"; existing suggestions and AI tags stay). To remove AI tags, delete `autotag/ai_tags.json`.
+- **Roll back:** pin the previous `:<sha>` image tag; `.bak` copies of `autotag.json` and `ai_tags.json` are kept; delete `autotag/cache/` if scores look wrong.
+- **Recover from a crash:** nothing needs cleaning up. Writes are atomic, finished tags and frame batches are already cached, and the next run continues from there.

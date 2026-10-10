@@ -95,6 +95,20 @@ chk "notify-test: file mode 600" "$(stat -f %Lp $AT/notify_test.json 2>/dev/null
 chk "notify-test: too soon -> 429" "$(nt '{}')" 429
 chk "notify-test: status flag exposed" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["notifications"])')" True
 rm -f $AT/notify_test.json
+fp() { curl -s -o /tmp/at_body -w '%{http_code}' -X POST "$B/api/autotag/frames" -H 'Content-Type: application/json' "${@:2}" -d "$1"; }
+chk "frames: default config is off" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"])')" "{'mode': 'off', 'mouth': False, 'budget_min': 120}"
+chk "frames: set trial" "$(fp '{"mode":"trial","mouth":true,"budget_min":60}')" 200
+chk "frames: read back" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"])')" "{'mode': 'trial', 'mouth': True, 'budget_min': 60}"
+chk "frames: file mode 600" "$(stat -f %Lp $AT/frames.json 2>/dev/null || stat -c %a $AT/frames.json)" 600
+chk "frames: budget defaults" "$(fp '{"mode":"full","mouth":false}')" 200
+chk "frames: bad mode -> 400" "$(fp '{"mode":"everything","mouth":false}')" 400
+chk "frames: mouth must be boolean -> 400" "$(fp '{"mode":"full","mouth":"yes"}')" 400
+chk "frames: budget too small -> 400" "$(fp '{"mode":"full","mouth":false,"budget_min":5}')" 400
+chk "frames: budget string -> 400" "$(fp '{"mode":"full","mouth":false,"budget_min":"60"}')" 400
+chk "frames: cross-origin -> 403" "$(fp '{"mode":"full","mouth":false}' -H 'Origin: http://evil.example')" 403
+setst '{"state":"idle","frames":{"stats":{"done":120,"total":1000,"rate":2.5,"mode":"trial","ts":1},"trial":{"scenery":{"n_pos":40,"n":300,"ap_cover":0.2,"ap_frames":0.5}}}}' 0
+chk "frames: stats and trial exposed" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;f=json.load(sys.stdin)["frames"];print(f["stats"]["done"],f["trial"]["scenery"]["ap_frames"])')" "120 0.5"
+rm -f $AT/frames.json
 # long silent job: status.json heartbeat is stale, but the worker's own heartbeat.json is fresh -> still online
 setst '{"state":"running","phase":"training","detail":"tag 3 of 11"}' 600
 chk "heartbeat: stale status alone -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False
@@ -102,5 +116,5 @@ python3 -c "import json,time;json.dump({'t':time.time()},open('$AT/heartbeat.jso
 chk "heartbeat: fresh heartbeat.json -> online while running" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["workerOnline"],d["state"],d["detail"])')" "True running tag 3 of 11"
 python3 -c "import json,time;json.dump({'t':time.time()-300},open('$AT/heartbeat.json','w'))"
 chk "heartbeat: old heartbeat.json -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False
-rm -f $AT/status.json $AT/run_request.json $AT/schedule.json $AT/heartbeat.json $AT/notify_test.json
+rm -f $AT/status.json $AT/run_request.json $AT/schedule.json $AT/heartbeat.json $AT/notify_test.json $AT/frames.json
 exit $fail
