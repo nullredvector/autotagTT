@@ -8,7 +8,7 @@ def main():
     os.umask(0o077)   # everything we create is owner-only
     ap = argparse.ArgumentParser(prog="autotagtt")
     sub = ap.add_subparsers(dest="cmd")
-    for name in ("embed", "train", "run", "montage", "worker"):
+    for name in ("embed", "train", "run", "montage", "worker", "notify-test"):
         p = sub.add_parser(name)
         p.add_argument("--model", default=DEFAULT_MODEL)
         p.add_argument("--pretrained", default=DEFAULT_PRETRAINED)
@@ -17,6 +17,10 @@ def main():
         p.add_argument("--top", type=int, default=300)
     a = ap.parse_args()
     cmd = a.cmd or "run"
+    if cmd == "notify-test":
+        from . import notify
+        print("sent" if notify.notify("test", "autotagTT: test notification", "If you can read this, notifications are working.", tags=["bell"]) else "not sent (is NTFY_URL set?)")
+        return
     if cmd == "worker":
         from .worker import main as worker_main
         return worker_main()

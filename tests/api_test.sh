@@ -83,6 +83,18 @@ chk "schedule: hour 24 -> 400" "$(sp '{"enabled":true,"hour":24}')" 400
 chk "schedule: non-bool -> 400" "$(sp '{"enabled":"yes","hour":3}')" 400
 chk "schedule: string hour -> 400" "$(sp '{"enabled":true,"hour":"3"}')" 400
 chk "schedule: cross-origin -> 403" "$(sp '{"enabled":true,"hour":3}' -H 'Origin: http://evil.example')" 403
+nt() { curl -s -o /tmp/at_body -w '%{http_code}' -X POST "$B/api/autotag/notify-test" -H 'Content-Type: application/json' "${@:2}" -d "$1"; }
+setst '{"state":"idle","notifications":false}' 0
+chk "notify-test: notifications off -> 409" "$(nt '{}')" 409
+setst '{"state":"idle","notifications":true}' 120
+chk "notify-test: worker offline -> 503" "$(nt '{}')" 503
+setst '{"state":"idle","notifications":true}' 0
+chk "notify-test: cross-origin -> 403" "$(nt '{}' -H 'Origin: http://evil.example')" 403
+chk "notify-test: ok" "$(nt '{}')" 200
+chk "notify-test: file mode 600" "$(stat -f %Lp $AT/notify_test.json 2>/dev/null || stat -c %a $AT/notify_test.json)" 600
+chk "notify-test: too soon -> 429" "$(nt '{}')" 429
+chk "notify-test: status flag exposed" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["notifications"])')" True
+rm -f $AT/notify_test.json
 # long silent job: status.json heartbeat is stale, but the worker's own heartbeat.json is fresh -> still online
 setst '{"state":"running","phase":"training","detail":"tag 3 of 11"}' 600
 chk "heartbeat: stale status alone -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False
@@ -90,5 +102,5 @@ python3 -c "import json,time;json.dump({'t':time.time()},open('$AT/heartbeat.jso
 chk "heartbeat: fresh heartbeat.json -> online while running" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["workerOnline"],d["state"],d["detail"])')" "True running tag 3 of 11"
 python3 -c "import json,time;json.dump({'t':time.time()-300},open('$AT/heartbeat.json','w'))"
 chk "heartbeat: old heartbeat.json -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False
-rm -f $AT/status.json $AT/run_request.json $AT/schedule.json $AT/heartbeat.json
+rm -f $AT/status.json $AT/run_request.json $AT/schedule.json $AT/heartbeat.json $AT/notify_test.json
 exit $fail

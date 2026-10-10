@@ -248,3 +248,78 @@ def test_worker_progress_counter_and_heartbeat_file(wk):
     threading.Thread(target=wk.heartbeat_loop, args=(0.05,), daemon=True).start()
     import time as _t; _t.sleep(0.3)
     assert json.loads(wk.HEARTBEAT.read_text())["t"] > _t.time() - 5
+
+
+# ───────────── notifications (no network: urlopen is faked) ─────────────
+class _Resp:
+    status = 200
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+@pytest.fixture
+def nt(monkeypatch):
+    sent = []
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: (sent.append((req.full_url, req.headers, json.loads(req.data))), _Resp())[1])
+    from autotagtt import notify
+    importlib.reload(notify)
+    return notify, sent
+
+
+def test_notify_disabled_without_url(nt, monkeypatch):
+    notify, sent = nt
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    assert notify.enabled() is False and notify.notify("done", "t", "m") is False and sent == []
+
+
+def test_notify_done_message_has_counts_only_and_respects_events(nt, monkeypatch):
+    notify, sent = nt
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example.com/secret-topic-123")
+    monkeypatch.setenv("NTFY_TOKEN", "tk")
+    st = {"phase": "done", "reason": "nightly", "result": {
+        "Very Private Tag": {"gate": "ok", "pending": 1200, "ai_count": 300},
+        "another secret": {"gate": "weak", "pending": 0, "ai_count": 0}}}
+    notify.run_finished(st)
+    assert len(sent) == 1
+    url, headers, body = sent[0]
+    assert url == "https://ntfy.example.com/" and body["topic"] == "secret-topic-123"
+    assert headers["Authorization"] == "Bearer tk"
+    blob = json.dumps(body).lower()
+    assert "private" not in blob and "secret tag" not in blob and "another secret" not in blob
+    assert "1 tag usable" in body["message"] and "1 too weak" in body["message"] and "1,200" in body["message"] and "Nightly" in body["message"]
+    monkeypatch.setenv("NOTIFY_EVENTS", "failed")
+    notify.run_finished(st)
+    assert len(sent) == 1                                          # 'done' filtered out
+
+
+def test_notify_failure_message_and_dedupe(nt, monkeypatch):
+    notify, sent = nt
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example.com/t")
+    notify.run_finished({"phase": "failed", "error": "job failed (exit code 1); see /archive/x"})
+    notify.run_finished({"phase": "failed"})
+    assert len(sent) == 1 and "/archive" not in json.dumps(sent[0][2])   # no paths; repeat failures deduped
+
+
+def test_notify_never_raises_or_leaks_url(nt, monkeypatch, capsys):
+    notify, sent = nt
+    import urllib.request
+    def boom(req, timeout=0): raise OSError("secret-topic-123 unreachable")
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example.com/secret-topic-123")
+    assert notify.notify("test", "t", "m") is False
+    assert "secret-topic-123" not in capsys.readouterr().out
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example.com/")          # no topic
+    assert notify.notify("test", "t", "m") is False
+
+
+def test_worker_sends_test_notification_once_and_reports(wk, nt, monkeypatch):
+    notify, sent = nt
+    from autotagtt import worker
+    importlib.reload(worker)
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example.com/t")
+    from autotagtt.archive import write_json_atomic
+    write_json_atomic(worker.NOTIFY_TEST, {"id": "n1", "ts": 1})
+    st = {}
+    worker.tick(st); worker.tick(st)
+    assert len(sent) == 1 and st["notify_test"]["ok"] is True and st["notifications"] is True

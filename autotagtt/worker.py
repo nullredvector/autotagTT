@@ -8,9 +8,11 @@ Files (all under data/.appdata/autotag/, owner-only):
 The command is fixed in this file; nothing in the request files can change what is executed."""
 import json, os, subprocess, sys, threading, time
 from .archive import OUT, write_json_atomic
+from . import notify
 
 REQUEST = OUT / "run_request.json"
 SCHEDULE = OUT / "schedule.json"
+NOTIFY_TEST = OUT / "notify_test.json"   # written by Starplayer's "Send test notification" button
 STATUS = OUT / "status.json"
 HEARTBEAT = OUT / "heartbeat.json"   # written by its own thread, so a long silent job never looks like a dead worker
 LOG = OUT / "last_run.log"
@@ -116,6 +118,10 @@ def run_job(st, reason, request_id=None):
     st.pop("_started", None); st.pop("_finished", None)
     st.update(finished=time.time(), detail="")
     save_status(st)
+    try:
+        notify.run_finished(st)
+    except Exception:
+        pass
 
 
 def due_schedule(st, now=None):
@@ -131,8 +137,19 @@ def due_schedule(st, now=None):
     return lt.tm_hour >= hour and st.get("last_scheduled_day") != day
 
 
+def handle_test_notification(st):
+    req = _read(NOTIFY_TEST)
+    rid = req.get("id") if isinstance(req, dict) and isinstance(req.get("id"), str) else None
+    if rid and rid != (st.get("notify_test") or {}).get("id"):
+        ok = notify.notify("test", "autotagTT: test notification", "If you can read this, notifications are working.", tags=["bell"])
+        st["notify_test"] = {"id": rid, "ok": bool(ok), "ts": time.time()}
+        save_status(st)
+
+
 def tick(st, now=None):
     """One poll step. Returns True if a job ran."""
+    handle_test_notification(st)
+    st["notifications"] = notify.enabled()
     req = _read(REQUEST)
     rid = req.get("id") if isinstance(req, dict) and isinstance(req.get("id"), str) else None
     if rid and rid != st.get("last_request_id"):

@@ -49,3 +49,10 @@ New GHCR packages start private: make the package public (Package settings) or `
 Add the service from `docker-compose.yml` to your stack with `ARCHIVE_PATH` set; Watchtower updates it from `:latest`.
 To disable: stop the service (Starplayer then shows "worker offline"; existing suggestions stay). To roll back: pin the
 previous `:<sha>` tag.
+
+## Notifications (ntfy)
+Same settings as ttpull; off unless `NTFY_URL` is set on the worker (`NTFY_URL=https://<your ntfy>/<long-random-topic>`,
+optional `NTFY_TOKEN`, `NOTIFY_EVENTS=done,failed`). A message is sent when a run finishes or fails. Messages contain counts
+only (tags usable/too weak, suggestions to review, AI-tagged), never tag names, video IDs or paths. Use your own ntfy server if
+you don't want even those counts to reach a public one. Test from the Run panel ("Send test") or
+`docker exec <worker> python -m autotagtt notify-test`.
