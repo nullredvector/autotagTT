@@ -52,4 +52,36 @@ chk "tags bad entry -> 400" "$(tp '{"enabled":[5]}')" 400
 chk "tags cross-origin -> 403" "$(tp '{"enabled":["braces"]}' -H 'Origin: http://evil.example')" 403
 chk "tags config mode 600" "$(stat -f %Lp $A/data/.appdata/autotag_tags.json 2>/dev/null || stat -c %a $A/data/.appdata/autotag_tags.json)" 600
 chk "stars.json still untouched" "$(shasum $A/data/.appdata/stars.json)" "$STARS_BEFORE"
+# ── run control (a fake worker is simulated by writing status.json) ──
+AT=$A/data/.appdata/autotag
+rp() { curl -s -o /tmp/at_body -w '%{http_code}' -X POST "$B/api/autotag/run" -H 'Content-Type: application/json' "${@:2}" -d "$1"; }
+setst() { python3 -c "import json,time,sys;d=json.loads(sys.argv[1]);d['heartbeat']=time.time()-float(sys.argv[2]);json.dump(d,open('$AT/status.json','w'))" "$1" "${2:-0}"; }
+rm -f $AT/status.json $AT/run_request.json
+chk "run: no worker -> 503" "$(rp '{}')" 503
+setst '{"state":"idle"}' 120
+chk "run: stale heartbeat -> 503" "$(rp '{}')" 503
+setst '{"state":"idle"}' 0
+chk "run: status shows idle+online" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["state"],d["workerOnline"])')" "idle True"
+chk "run: cross-origin -> 403" "$(rp '{}' -H 'Origin: http://evil.example')" 403
+chk "run: ok" "$(rp '{}')" 200
+chk "run: request file mode 600" "$(stat -f %Lp $AT/run_request.json 2>/dev/null || stat -c %a $AT/run_request.json)" 600
+chk "run: now queued" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["state"])')" queued
+chk "run: second request while queued -> 409" "$(rp '{}')" 409
+RID=$(python3 -c "import json;print(json.load(open('$AT/run_request.json'))['id'])")
+setst '{"state":"running","phase":"embedding","last_request_id":"'$RID'"}' 0
+chk "run: running" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["state"],d["phase"])')" "running embedding"
+chk "run: while running -> 409" "$(rp '{}')" 409
+setst '{"state":"idle","phase":"done","last_request_id":"'$RID'"}' 0
+chk "run: too soon after previous -> 429" "$(rp '{}')" 429
+chk "run: array body -> 400" "$(rp '[1]')" 400
+chk "run: GET status has no paths/secrets" "$(curl -s $B/api/autotag/run | grep -c '/mnt\|/archive')" 0
+sp() { curl -s -o /tmp/at_body -w '%{http_code}' -X POST "$B/api/autotag/schedule" -H 'Content-Type: application/json' "${@:2}" -d "$1"; }
+chk "schedule: ok" "$(sp '{"enabled":true,"hour":3}')" 200
+chk "schedule: read back" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["schedule"])')" "{'enabled': True, 'hour': 3}"
+chk "schedule: file mode 600" "$(stat -f %Lp $AT/schedule.json 2>/dev/null || stat -c %a $AT/schedule.json)" 600
+chk "schedule: hour 24 -> 400" "$(sp '{"enabled":true,"hour":24}')" 400
+chk "schedule: non-bool -> 400" "$(sp '{"enabled":"yes","hour":3}')" 400
+chk "schedule: string hour -> 400" "$(sp '{"enabled":true,"hour":"3"}')" 400
+chk "schedule: cross-origin -> 403" "$(sp '{"enabled":true,"hour":3}' -H 'Origin: http://evil.example')" 403
+rm -f $AT/status.json $AT/run_request.json $AT/schedule.json
 exit $fail
