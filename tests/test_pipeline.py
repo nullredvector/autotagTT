@@ -172,3 +172,63 @@ def test_ai_cutoff_uses_reviewed_precision(arch):
     assert not (kept & (accepted | rejected))                         # reviewed items excluded
     assert all(oof[int(v[1:])] >= r["cutoff"] for v in kept)
     assert r["cutoff"] > oof[99]                                      # stops before the 50% precision zone
+
+
+# ───────────── worker (fake job, no GPU) ─────────────
+@pytest.fixture
+def wk(arch, monkeypatch, tmp_path):
+    job = tmp_path / "fakejob.py"
+    job.write_text("import sys,json,os\nprint('covers: 10 total, 0 embedded, 10 to do')\nprint('  10/10  50 img/s  eta 0.0 min  vram 1.0 GB')\n"
+                   "print('[tag-aaaaaa] embedded=10 positives=3 reviewed_rejected=0')\n"
+                   "if os.environ.get('FAKE_FAIL'): sys.exit(3)\n")
+    monkeypatch.setenv("AUTOTAGTT_TEST_JOB", str(job))
+    for m in ("autotagtt.archive", "autotagtt.worker"):
+        importlib.reload(importlib.import_module(m))
+    from autotagtt import worker
+    return worker
+
+
+def test_worker_runs_a_request_once_and_reports(wk):
+    from autotagtt.archive import write_json_atomic
+    write_json_atomic(wk.REQUEST, {"id": "r1", "ts": 1})
+    st = wk.load_status()
+    assert wk.tick(st) is True
+    s = wk.load_status()
+    assert s["state"] == "idle" and s["phase"] == "done" and s["last_request_id"] == "r1" and s["error"] is None
+    assert wk.tick(wk.load_status()) is False                    # same request id is never run twice
+    write_json_atomic(wk.REQUEST, {"id": "r2", "ts": 2})
+    assert wk.tick(wk.load_status()) is True
+    assert stat.S_IMODE(os.stat(wk.STATUS).st_mode) == 0o600
+
+
+def test_worker_failure_is_reported_without_details(wk, monkeypatch):
+    from autotagtt.archive import write_json_atomic
+    monkeypatch.setenv("FAKE_FAIL", "1")
+    write_json_atomic(wk.REQUEST, {"id": "f1", "ts": 1})
+    wk.tick(wk.load_status())
+    s = wk.load_status()
+    assert s["phase"] == "failed" and s["state"] == "idle" and "/" not in s["error"]
+
+
+def test_worker_ignores_malformed_requests(wk):
+    wk.REQUEST.parent.mkdir(parents=True, exist_ok=True)
+    for bad in ("{nope", "[]", '{"id": 5}', ""):
+        wk.REQUEST.write_text(bad)
+        assert wk.tick(wk.load_status()) is False
+
+
+def test_worker_nightly_schedule_runs_once_per_day(wk):
+    from autotagtt.archive import write_json_atomic
+    import time as _t
+    now = _t.mktime((2026, 10, 12, 3, 30, 0, 0, 0, -1))
+    st = {}
+    assert wk.tick(st, now) is False                              # no schedule file
+    write_json_atomic(wk.SCHEDULE, {"enabled": True, "hour": 3})
+    assert wk.tick(st, now - 3600) is False                       # 02:30, not yet
+    assert wk.tick(st, now) is True                               # 03:30 runs
+    assert wk.tick(st, now + 600) is False                        # not again the same day
+    assert wk.tick(st, now + 86400) is True                       # next day
+    write_json_atomic(wk.SCHEDULE, {"enabled": False, "hour": 3})
+    assert wk.tick(st, now + 2 * 86400) is False
+    write_json_atomic(wk.SCHEDULE, {"enabled": True, "hour": 99})
+    assert wk.tick(st, now + 3 * 86400) is False                  # invalid hour ignored

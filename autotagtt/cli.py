@@ -8,7 +8,7 @@ def main():
     os.umask(0o077)   # everything we create is owner-only
     ap = argparse.ArgumentParser(prog="autotagtt")
     sub = ap.add_subparsers(dest="cmd")
-    for name in ("embed", "train", "run", "montage"):
+    for name in ("embed", "train", "run", "montage", "worker"):
         p = sub.add_parser(name)
         p.add_argument("--model", default=DEFAULT_MODEL)
         p.add_argument("--pretrained", default=DEFAULT_PRETRAINED)
@@ -17,6 +17,9 @@ def main():
         p.add_argument("--top", type=int, default=300)
     a = ap.parse_args()
     cmd = a.cmd or "run"
+    if cmd == "worker":
+        from .worker import main as worker_main
+        return worker_main()
     tags = [t.strip().lower() for t in a.tags.split(",") if t.strip()] or enabled_tags()
 
     if cmd in ("embed", "run"):
