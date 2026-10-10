@@ -1,4 +1,5 @@
 FROM pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+LABEL org.opencontainers.image.source="https://github.com/nullredvector/autotagTT"
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir open_clip_torch scikit-learn pillow numpy
 WORKDIR /app

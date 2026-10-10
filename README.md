@@ -1,5 +1,9 @@
 # autotagTT
 
+> **Privacy:** this repository contains code only. Archive content, covers, embeddings, suggestions, feedback and model
+> caches live in the archive's `data/.appdata/autotag/` folder on your own server and must never be committed (see `.gitignore`).
+> Nothing is uploaded anywhere; the only network access is the one-time model-weight download.
+
 Local batch job that suggests tags (first: `braces`) for the Starplayer archive from cover images.
 All processing is local; nothing is uploaded. It only **reads** `stars.json` / archive files and
 **writes** under `data/.appdata/autotag/` (owner-only permissions, atomic writes, `.bak` of previous output).
@@ -38,3 +42,10 @@ Starplayer, training ignores it, and it stays hidden from Pending until moved ba
   AI-tagged above a per-tag cutoff: the point where precision of the latest 50 reviewed decisions (walking down the ranking) stays
   >= 80%. With under 30 reviews for a tag, only its top 100 are tagged ("unvalidated").
   Starplayer hides an AI tag once the video is in the same-named group or you accepted/rejected it.
+
+## Deploying
+CI (`.github/workflows/build.yml`) runs the tests and publishes `ghcr.io/<owner>/autotagtt:latest` on every push to `main`.
+New GHCR packages start private: make the package public (Package settings) or `docker login ghcr.io` on the server.
+Add the service from `docker-compose.yml` to your stack with `ARCHIVE_PATH` set; Watchtower updates it from `:latest`.
+To disable: stop the service (Starplayer then shows "worker offline"; existing suggestions stay). To roll back: pin the
+previous `:<sha>` tag.

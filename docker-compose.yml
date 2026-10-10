@@ -1,19 +1,22 @@
 # autotagTT worker: idles until Starplayer's "Run" button (or the nightly schedule) asks for a job, then embeds new
-# covers and trains every enabled tag. Add as a service to the Dockge stack next to starplayer.
+# covers and trains every enabled tag. Add it to the Dockge stack next to starplayer.
+# Set ARCHIVE_PATH to the host folder that Starplayer mounts as /archive (the one containing data/.appdata).
 # Least privilege: the archive is mounted read-only; only the autotag/ output folder is writable.
 services:
   autotagtt:
-    image: autotagtt:local          # later: ghcr.io/nullredvector/autotagtt:latest (needs the autotagTT repo)
+    image: ghcr.io/nullredvector/autotagtt:latest
     command: ["worker"]
     runtime: nvidia
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=true      # lets Watchtower pick up new builds
     environment:
       - ARCHIVE_DIR=/archive
       - NVIDIA_VISIBLE_DEVICES=all
       # - TZ=America/New_York         # the nightly schedule uses this container's local time
     volumes:
-      - /mnt/zion/enc/archive/Downloads/incomplete/content2/shorts:/archive:ro
-      - /mnt/zion/enc/archive/Downloads/incomplete/content2/shorts/data/.appdata/autotag:/archive/data/.appdata/autotag:rw
+      - ${ARCHIVE_PATH:?set ARCHIVE_PATH to the archive folder}:/archive:ro
+      - ${ARCHIVE_PATH}/data/.appdata/autotag:/archive/data/.appdata/autotag:rw
       - autotagtt-models:/models    # HF model cache (~4 GB, downloaded once)
     shm_size: 2g
 volumes:
