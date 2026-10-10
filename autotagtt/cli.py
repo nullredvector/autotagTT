@@ -11,7 +11,7 @@ def main():
         p = sub.add_parser(name)
         p.add_argument("--model", default=DEFAULT_MODEL)
         p.add_argument("--pretrained", default=DEFAULT_PRETRAINED)
-        p.add_argument("--tags", default="", help="comma separated group names (default: the tags enabled in Starplayer)")
+        p.add_argument("--tags", default="", help="comma separated group names (default: the tags enabled in kashibox)")
         p.add_argument("--limit", type=int, help="embed at most N new covers (smoke test)")
         p.add_argument("--top", type=int, default=300)
     a = ap.parse_args()
@@ -61,7 +61,7 @@ class _Lazy:
 
 
 def _frames_step(a, ids, X, tags, process=True):
-    """Frame analysis as configured in Starplayer: off | trial | full. Returns FrameFeatures or None."""
+    """Frame analysis as configured in kashibox: off | trial | full. Returns FrameFeatures or None."""
     import time
     from .archive import find_videos
     from .frames import FrameStore, frames_config, embed_videos, coverage, write_stats

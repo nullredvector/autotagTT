@@ -1,6 +1,6 @@
-# autotagTT worker: idles until Starplayer's "Run" button (or the nightly schedule) asks for a job, then embeds new
-# covers and trains every enabled tag. Add it to the Dockge stack next to starplayer.
-# Set ARCHIVE_PATH to the host folder that Starplayer mounts as /archive (the one containing data/.appdata).
+# autotagTT worker: idles until kashibox's "Run" button (or the nightly schedule) asks for a job, then embeds new
+# covers and trains every enabled tag. Add it to the Dockge stack next to kashibox.
+# Set ARCHIVE_PATH to the host folder that kashibox mounts as /archive (the one containing data/.appdata).
 # Least privilege: the archive is mounted read-only; only the autotag/ output folder is writable.
 services:
   autotagtt:

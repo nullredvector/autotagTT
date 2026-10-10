@@ -1,10 +1,10 @@
-"""Always-on worker: waits for a run request from Starplayer (or the nightly schedule), then runs the fixed
+"""Always-on worker: waits for a run request from kashibox (or the nightly schedule), then runs the fixed
 job `python -m autotagtt run` (embed new covers, train every enabled tag) in a subprocess and reports status.
 
 Files (all under data/.appdata/autotag/, owner-only):
-  run_request.json  written by Starplayer  {"id": str, "ts": epoch}
-  schedule.json     written by Starplayer  {"enabled": bool, "hour": 0-23}
-  status.json       written here           state/phase/heartbeat/last result (read by Starplayer)
+  run_request.json  written by kashibox  {"id": str, "ts": epoch}
+  schedule.json     written by kashibox  {"enabled": bool, "hour": 0-23}
+  status.json       written here           state/phase/heartbeat/last result (read by kashibox)
 The command is fixed in this file; nothing in the request files can change what is executed."""
 import json, os, subprocess, sys, threading, time
 from .archive import OUT, write_json_atomic
@@ -12,7 +12,7 @@ from . import notify
 
 REQUEST = OUT / "run_request.json"
 SCHEDULE = OUT / "schedule.json"
-NOTIFY_TEST = OUT / "notify_test.json"   # written by Starplayer's "Send test notification" button
+NOTIFY_TEST = OUT / "notify_test.json"   # written by kashibox's "Send test notification" button
 STATUS = OUT / "status.json"
 HEARTBEAT = OUT / "heartbeat.json"   # written by its own thread, so a long silent job never looks like a dead worker
 LOG = OUT / "last_run.log"
@@ -43,7 +43,7 @@ def save_status(st):
 
 
 def frames_info():
-    """Frame-analysis progress and trial comparison (tag names appear only here, for Starplayer's UI)."""
+    """Frame-analysis progress and trial comparison (tag names appear only here, for kashibox's UI)."""
     out = {}
     stats = _read(OUT / "frames_stats.json")
     if isinstance(stats, dict):
@@ -55,7 +55,7 @@ def frames_info():
 
 
 def summarize():
-    """Per-tag result from autotag.json. Tag names are only for Starplayer's UI; they are never logged."""
+    """Per-tag result from autotag.json. Tag names are only for kashibox's UI; they are never logged."""
     d = _read(OUT / "autotag.json") or {}
     out = {}
     for tag, m in (d.get("_meta", {}).get("metrics") or {}).items():

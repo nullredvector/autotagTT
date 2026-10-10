@@ -1,4 +1,4 @@
-"""Read-only access to the Starplayer archive layout and user data."""
+"""Read-only access to the kashibox archive layout and user data."""
 import base64, gzip, json, os, re
 from pathlib import Path
 
@@ -41,7 +41,7 @@ def load_groups():
     return {g["name"].strip().lower(): set(g["videoIds"]) for g in sj.get("groups", [])}
 
 
-TAGS_CONFIG = APPDATA / "autotag_tags.json"   # {"enabled": [group names]}, written by Starplayer's tag picker
+TAGS_CONFIG = APPDATA / "autotag_tags.json"   # {"enabled": [group names]}, written by kashibox's tag picker
 OPEN_LABELS = {"braces"}                      # tags whose names may appear in logs; all others are anonymised
 
 

@@ -1,5 +1,5 @@
-"""Build a synthetic Starplayer archive (fake IDs, generated images/videos) for the integration harness.
-usage: make_scratch_archive.py <out_dir> <mTT_checkout>   -- never reads real archive data."""
+"""Build a synthetic kashibox archive (fake IDs, generated images/videos) for the integration harness.
+usage: make_scratch_archive.py <out_dir> <kashibox_checkout>   -- never reads real archive data."""
 import base64, gzip, json, subprocess, shutil, sys
 from pathlib import Path
 from PIL import Image, ImageDraw

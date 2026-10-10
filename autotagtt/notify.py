@@ -50,7 +50,7 @@ def notify(event, title, message, priority=3, tags=(), dedupe_key=None, dedupe_s
 def run_finished(st):
     """Called when a job ends. Uses only the numbers from the run summary."""
     if st.get("phase") == "failed":
-        notify("failed", "autotagTT: run failed", "The AI tagger run did not finish. Check the Run panel in Starplayer.",
+        notify("failed", "autotagTT: run failed", "The AI tagger run did not finish. Check the Run panel in kashibox.",
                priority=4, tags=["warning"], dedupe_key="failed", dedupe_s=6 * 3600)
         return
     summary = st.get("run_summary")

@@ -4,10 +4,10 @@
 > caches live in the archive's `data/.appdata/autotag/` folder on your own server and must never be committed (see `.gitignore`).
 > Nothing is uploaded anywhere; the only network access is the one-time model-weight download.
 
-Local batch job that suggests tags (first: `braces`) for the Starplayer archive from cover images.
+Local batch job that suggests tags (first: `braces`) for the kashibox archive from cover images.
 All processing is local; nothing is uploaded. It only **reads** `stars.json` / archive files and
 **writes** under `data/.appdata/autotag/` (owner-only permissions, atomic writes, `.bak` of previous output).
-It never edits groups: users accept/reject in Starplayer.
+It never edits groups: users accept/reject in kashibox.
 
 ```
 python -m autotagtt embed   [--limit N]   # SigLIP fp16 cover embeddings, sharded + resumable
@@ -31,23 +31,23 @@ Real SigLIP inference has not been run yet.
 
 ## Review decisions
 `accepted` → positive label, `rejected` → confirmed negative (weight 5), `unsure` → **no label**: the video is set aside in
-Starplayer, training ignores it, and it stays hidden from Pending until moved back.
+kashibox, training ignores it, and it stays hidden from Pending until moved back.
 
 ## Multiple tags and AI tags
-- `data/.appdata/autotag_tags.json` (`{"enabled": [group names]}`) lists the groups to learn. Starplayer's "Tags…" picker on the
+- `data/.appdata/autotag_tags.json` (`{"enabled": [group names]}`) lists the groups to learn. kashibox's "Tags…" picker on the
   review page writes it; default is `braces`. One embedding pass serves every tag; each tag only costs a small classifier.
 - Per tag: skipped below 30 positives, and "weak" (no suggestions/AI tags) if cross-validated AUC < 0.80.
 - Logs anonymise tag names (`tag-xxxxxx`); only `braces` is printed by name.
 - `ai_tags.json` holds model labels **separate from human groups**: `{"videos": {id: [[tag, score], ...]}}`. A video is
   AI-tagged above a per-tag cutoff: the point where precision of the latest 50 reviewed decisions (walking down the ranking) stays
   >= 80%. With under 30 reviews for a tag, only its top 100 are tagged ("unvalidated").
-  Starplayer hides an AI tag once the video is in the same-named group or you accepted/rejected it.
+  kashibox hides an AI tag once the video is in the same-named group or you accepted/rejected it.
 
 ## Deploying
 CI (`.github/workflows/build.yml`) runs the tests and publishes `ghcr.io/<owner>/autotagtt:latest` on every push to `main`.
 New GHCR packages start private: make the package public (Package settings) or `docker login ghcr.io` on the server.
 Add the service from `docker-compose.yml` to your stack with `ARCHIVE_PATH` set; Watchtower updates it from `:latest`.
-To disable: stop the service (Starplayer then shows "worker offline"; existing suggestions stay). To roll back: pin the
+To disable: stop the service (kashibox then shows "worker offline"; existing suggestions stay). To roll back: pin the
 previous `:<sha>` tag.
 
 ## Notifications (ntfy)
@@ -69,7 +69,7 @@ you don't want even those counts to reach a public one. Test from the Run panel 
 
 Per-tag caches live in `data/.appdata/autotag/cache/<hash>/` (hashed names, owner-only): delete the folder to force full retraining.
 
-### Frame analysis (Milestone 5), controlled from Starplayer's Run panel
+### Frame analysis (Milestone 5), controlled from kashibox's Run panel
 - **Off** (default). **Trial** reads frames for a sample (a few thousand videos: positives of each enabled tag plus random others) and shows,
   per tag, cross-validated accuracy with and without frames; real outputs are unchanged. **Full** reads every video, in runs of up to N minutes
   (resumes where it stopped; newest videos first). Switching back to Off stops it; cached frame embeddings are kept.
@@ -80,6 +80,6 @@ Per-tag caches live in `data/.appdata/autotag/cache/<hash>/` (hashed names, owne
 
 ### Update, disable, roll back
 - **Update:** push to `main`; CI publishes the image and Watchtower restarts the worker (do not push while a run is in progress: the run is lost and restarts from its last cached step).
-- **Disable the feature:** stop the worker container (Starplayer shows "worker offline"; existing suggestions and AI tags stay). To remove AI tags, delete `autotag/ai_tags.json`.
+- **Disable the feature:** stop the worker container (kashibox shows "worker offline"; existing suggestions and AI tags stay). To remove AI tags, delete `autotag/ai_tags.json`.
 - **Roll back:** pin the previous `:<sha>` image tag; `.bak` copies of `autotag.json` and `ai_tags.json` are kept; delete `autotag/cache/` if scores look wrong.
 - **Recover from a crash:** nothing needs cleaning up. Writes are atomic, finished tags and frame batches are already cached, and the next run continues from there.

@@ -6,7 +6,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 from .archive import OUT, APPDATA, load_groups, write_json_atomic, label
 
-FEEDBACK = APPDATA / "autotag_feedback.json"   # written by Starplayer: {tag: {accepted:[], rejected:[]}}
+FEEDBACK = APPDATA / "autotag_feedback.json"   # written by kashibox: {tag: {accepted:[], rejected:[]}}
 MIN_POSITIVES = 30                              # fewer reviewed/known positives than this: no model for the tag
 MIN_AUC = 0.80                                  # weaker tags are reported but never shown or auto-tagged
 AI_PRECISION = 0.80                             # AI tags are applied only above the score where reviewed precision >= this
@@ -349,7 +349,7 @@ def ai_tags(ids, oof, y, accepted, rejected, unsure):
 
 
 def write_ai_tags(results, model_name):
-    """ai_tags.json: {"videos": {id: [[tag, score], ...]}} sorted best-first. Starplayer reads it; it
+    """ai_tags.json: {"videos": {id: [[tag, score], ...]}} sorted best-first. kashibox reads it; it
     is separate from stars.json so human groups are never touched."""
     videos = {}
     for tag, r in results.items():
