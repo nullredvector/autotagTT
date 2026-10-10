@@ -41,6 +41,28 @@ def load_groups():
     return {g["name"].strip().lower(): set(g["videoIds"]) for g in sj.get("groups", [])}
 
 
+TAGS_CONFIG = APPDATA / "autotag_tags.json"   # {"enabled": [group names]}, written by Starplayer's tag picker
+OPEN_LABELS = {"braces"}                      # tags whose names may appear in logs; all others are anonymised
+
+
+def label(tag):
+    """Log label for a tag. Tag names are private: only the whitelisted ones are shown by name."""
+    if tag in OPEN_LABELS:
+        return tag
+    import hashlib
+    return "tag-" + hashlib.sha1(tag.encode()).hexdigest()[:6]
+
+
+def enabled_tags():
+    """Tags the user opted in to (lowercase). Defaults to braces when no config exists."""
+    try:
+        raw = json.loads(TAGS_CONFIG.read_text()).get("enabled", [])
+        tags = [str(t).strip().lower() for t in raw if isinstance(t, str) and t.strip()]
+        return list(dict.fromkeys(tags))
+    except Exception:
+        return ["braces"]
+
+
 def write_json_atomic(path, obj, backup=False):
     """Atomic, owner-only write. backup=True keeps the previous file as <name>.bak."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

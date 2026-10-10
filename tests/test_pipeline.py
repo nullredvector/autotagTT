@@ -85,13 +85,11 @@ def test_errors_are_graceful(arch):
     from autotagtt import train
     ids, X, pos = make_data()
     write_stars(arch, pos)
-    with pytest.raises(SystemExit):
-        train.train_tag("nonexistent", ids, X)
+    assert train.train_tag("nonexistent", ids, X) is None
     with pytest.raises(SystemExit):
         train.train_tag("braces", [], np.zeros((0, 0)))
     write_stars(arch, {"v00000"})
-    with pytest.raises(SystemExit):
-        train.train_tag("braces", ids, X)   # too few positives
+    assert train.train_tag("braces", ids, X) is None   # too few positives
 
 
 def test_store_resume_and_private_perms(arch):
@@ -135,3 +133,42 @@ def test_unsure_is_excluded_from_training_and_suggestions(arch):
     r = train.train_tag("braces", ids, X, top=300)
     assert r["metrics"]["excluded_unsure"] == 2 and r["metrics"]["n"] == len(ids) - 2
     assert not ({x["id"] for x in r["suggestions"]} & set(uns))
+
+
+def write_multi(root, groups):
+    (root / "data/.appdata/stars.json").write_text(json.dumps({"stars": [], "levels": [], "groups": [
+        {"id": f"g{i}", "name": n, "videoIds": sorted(v)} for i, (n, v) in enumerate(groups.items())]}))
+
+
+def test_multi_tag_config_labels_gate_and_ai_tags(arch):
+    from autotagtt import archive, train
+    importlib.reload(archive)
+    ids, X, pos = make_data(n=800, npos=80)
+    rng = np.random.default_rng(5)
+    noise = set(rng.choice(ids, 60, replace=False).tolist())          # a tag with no visual signal
+    write_multi(arch, {"braces": set(sorted(pos)[:60]), "Secret Tag": noise, "tiny": {"v00001", "v00002"}})
+    (arch / "data/.appdata/autotag_tags.json").write_text(json.dumps({"enabled": ["Braces", "secret tag", "tiny"]}))
+    assert archive.enabled_tags() == ["braces", "secret tag", "tiny"]
+    assert archive.label("braces") == "braces" and "secret" not in archive.label("secret tag")
+    res = {t: train.train_tag(t, ids, X, top=30) for t in archive.enabled_tags()}
+    assert res["tiny"] is None                                        # too few positives
+    assert res["braces"]["metrics"]["gate"] == "ok" and res["secret tag"]["metrics"]["gate"] == "weak"
+    assert res["secret tag"]["suggestions"] == [] and res["secret tag"]["ai"] == {}
+    ai = res["braces"]["ai"]
+    assert ai and not (set(ai) & set(sorted(pos)[:60]))               # never tags videos already in the human group
+    assert res["braces"]["metrics"]["ai_mode"] == "unvalidated" and len(ai) <= train.AI_UNVALIDATED_TOP
+
+
+def test_ai_cutoff_uses_reviewed_precision(arch):
+    from autotagtt.train import ai_tags
+    ids = [f"v{i}" for i in range(200)]
+    oof = np.linspace(5, -5, 200)                                     # rank order == id order
+    y = np.zeros(200, int)
+    accepted = {f"v{i}" for i in range(0, 60)} | {f"v{i}" for i in range(60, 100, 2)}   # 60 sure hits, then 50/50
+    rejected = {f"v{i}" for i in range(61, 100, 2)}
+    r = ai_tags(ids, oof, y, accepted, rejected, set())
+    assert r["mode"] == "reviewed" and r["cutoff"] is not None
+    kept = set(r["items"])
+    assert not (kept & (accepted | rejected))                         # reviewed items excluded
+    assert all(oof[int(v[1:])] >= r["cutoff"] for v in kept)
+    assert r["cutoff"] > oof[99]                                      # stops before the 50% precision zone

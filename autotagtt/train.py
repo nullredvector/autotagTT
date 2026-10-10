@@ -4,9 +4,14 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
-from .archive import OUT, APPDATA, load_groups, write_json_atomic
+from .archive import OUT, APPDATA, load_groups, write_json_atomic, label
 
 FEEDBACK = APPDATA / "autotag_feedback.json"   # written by Starplayer: {tag: {accepted:[], rejected:[]}}
+MIN_POSITIVES = 30                              # fewer reviewed/known positives than this: no model for the tag
+MIN_AUC = 0.80                                  # weaker tags are reported but never shown or auto-tagged
+AI_PRECISION = 0.80                             # AI tags are applied only above the score where reviewed precision >= this
+AI_MIN_REVIEWED = 30
+AI_UNVALIDATED_TOP = 100                        # no usable reviews yet: only the top N per tag
 DUP_SIM = 0.97                                  # cosine similarity treated as the same image
 
 
@@ -70,7 +75,8 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
     X = X.astype(np.float32)
     groups = load_groups()
     if tag not in groups:
-        raise SystemExit("no group with that name in stars.json")
+        print(f"[{label(tag)}] no such group in stars.json; skipped", flush=True)
+        return None
     accepted, rejected, unsure = load_feedback(tag)
     unsure -= groups[tag] | accepted | rejected      # an explicit label always wins over "not sure"
     n_unsure = len(unsure & set(ids))
@@ -80,14 +86,15 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
     idx = {v: i for i, v in enumerate(ids)}
     pos_ids = groups[tag] | accepted
     y = np.array([1 if v in pos_ids else 0 for v in ids])
-    if y.sum() < folds:
-        raise SystemExit(f"only {int(y.sum())} embedded positives; need at least {folds}")
+    if y.sum() < max(folds, MIN_POSITIVES):
+        print(f"[{label(tag)}] only {int(y.sum())} embedded positives (need {MIN_POSITIVES}); skipped", flush=True)
+        return None
     w = np.ones(len(ids))
     for v in rejected:           # reviewed-and-rejected = confirmed negative, count more
         if v in idx and not y[idx[v]]:
             w[idx[v]] = 5.0
     n_rej = len(rejected & set(idx))
-    print(f"[{tag}] embedded={len(ids)} positives={y.sum()} reviewed_rejected={n_rej}", flush=True)
+    print(f"[{label(tag)}] embedded={len(ids)} positives={y.sum()} reviewed_rejected={n_rej}", flush=True)
 
     grp = dup_groups(X)
     print(f"  near-duplicate groups: {len(np.unique(grp))} for {len(ids)} images", flush=True)
@@ -132,8 +139,63 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0):
         sugg.append({"id": v, "score": round(float(oof[i]), 4), "status": "pending"})
         if len(sugg) >= top:
             break
+    metrics["gate"] = "ok" if metrics["auc"] >= MIN_AUC else "weak"
+    if metrics["gate"] == "weak":
+        print(f"  gate: weak (AUC < {MIN_AUC}); no suggestions or AI tags for this tag", flush=True)
+        sugg = []
     sc, clf = _fit(X, y, w, C)
-    return {"suggestions": sugg, "metrics": metrics, "model": (sc, clf)}
+    ai = ai_tags(ids, oof, y, accepted, rejected, unsure) if metrics["gate"] == "ok" else {"cutoff": None, "mode": "off", "items": {}}
+    metrics["ai_mode"], metrics["ai_cutoff"], metrics["ai_count"] = ai["mode"], ai["cutoff"], len(ai["items"])
+    print(f"  ai tags: mode={ai['mode']} cutoff={ai['cutoff']} count={len(ai['items'])}", flush=True)
+    return {"suggestions": sugg, "metrics": metrics, "model": (sc, clf), "ai": ai["items"]}
+
+
+def ai_tags(ids, oof, y, accepted, rejected, unsure):
+    """Videos to label with an AI tag (never in a human group, never already reviewed).
+    Cutoff = lowest score s where reviewed precision of everything scoring >= s is still >= AI_PRECISION
+    (needs AI_MIN_REVIEWED decisions above it); without enough reviews only the top AI_UNVALIDATED_TOP."""
+    order = np.argsort(-oof)
+    tp = n = 0
+    cutoff = None
+    for i in order:
+        v = ids[i]
+        if v in accepted or v in rejected:
+            n += 1
+            tp += v in accepted
+            if n >= AI_MIN_REVIEWED and tp / n >= AI_PRECISION:
+                cutoff = float(oof[i])
+    mode = "reviewed"
+    if cutoff is None:
+        mode = "unvalidated"
+    items, count = {}, 0
+    for i in order:
+        v = ids[i]
+        if y[i] or v in accepted or v in rejected or v in unsure:
+            continue
+        if mode == "reviewed" and oof[i] < cutoff:
+            break
+        if mode == "unvalidated" and count >= AI_UNVALIDATED_TOP:
+            break
+        items[v] = round(float(oof[i]), 4)
+        count += 1
+    return {"cutoff": None if cutoff is None else round(cutoff, 4), "mode": mode, "items": items}
+
+
+def write_ai_tags(results, model_name):
+    """ai_tags.json: {"videos": {id: [[tag, score], ...]}} sorted best-first. Starplayer reads it; it
+    is separate from stars.json so human groups are never touched."""
+    videos = {}
+    for tag, r in results.items():
+        for v, sc in r.get("ai", {}).items():
+            videos.setdefault(v, []).append([tag, sc])
+    for v in videos:
+        videos[v].sort(key=lambda t: -t[1])
+    out = {"_meta": {"model": model_name, "generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     "tags": sorted(t for t, r in results.items() if r.get("ai")),
+                     "note": "AI labels, uncalibrated scores; not human tags"},
+           "videos": videos}
+    write_json_atomic(OUT / "ai_tags.json", out, backup=True)
+    print(f"wrote ai_tags.json ({len(videos)} videos)")
 
 
 def write_suggestions(results, model_name, pretrained=None):
