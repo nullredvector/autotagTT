@@ -323,3 +323,258 @@ def test_worker_sends_test_notification_once_and_reports(wk, nt, monkeypatch):
     st = {}
     worker.tick(st); worker.tick(st)
     assert len(sent) == 1 and st["notify_test"]["ok"] is True and st["notifications"] is True
+
+
+# ───────────── M4: caching + incremental scoring ─────────────
+def _setup_tag(arch, n=600, npos=60, known=45, seed=0):
+    ids, X, pos = make_data(n=n, npos=npos, seed=seed)
+    write_stars(arch, set(sorted(pos)[:known]))
+    return ids, X, pos
+
+
+@pytest.fixture
+def cvspy(monkeypatch):
+    from autotagtt import train
+    calls = {"n": 0}
+    real = train._cv
+    def spy(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(train, "_cv", spy)
+    return calls
+
+
+def test_unchanged_tag_is_reused_without_retraining(arch, cvspy):
+    from autotagtt import train
+    ids, X, _ = _setup_tag(arch)
+    a = train.train_tag("braces", ids, X, top=40)
+    n1 = cvspy["n"]
+    assert a["mode"] == "trained" and n1 > 0
+    b = train.train_tag("braces", ids, X, top=40)
+    assert b["mode"] == "reused" and cvspy["n"] == n1                     # no cross-validation the second time
+    assert [s["id"] for s in a["suggestions"]] == [s["id"] for s in b["suggestions"]]
+    assert a["ai"] == b["ai"]
+
+
+def test_new_videos_are_scored_with_the_saved_model(arch, cvspy):
+    from autotagtt import train
+    ids, X, pos = _setup_tag(arch)
+    train.train_tag("braces", ids, X, top=40)
+    n1 = cvspy["n"]
+    rng = np.random.default_rng(9)
+    d = X.shape[1]
+    direction = np.linalg.lstsq(X[:60], np.ones(60), rcond=None)[0]       # roughly the positive direction
+    newX = rng.normal(size=(10, d)).astype(np.float32)
+    newX[:5] += 2.5 * (X[:45].mean(0) / np.linalg.norm(X[:45].mean(0))) * 6   # 5 that look like the positives
+    newX /= np.linalg.norm(newX, axis=1, keepdims=True)
+    nids = [f"new{i}" for i in range(10)]
+    r = train.train_tag("braces", ids + nids, np.vstack([X, newX]), top=800)
+    assert r["mode"] == "incremental" and cvspy["n"] == n1 and r["metrics"]["incremental_new"] == 10
+    sc = {s["id"]: s["score"] for s in r["suggestions"]}
+    assert all(f"new{i}" in sc for i in range(10))
+    assert np.mean([sc[f"new{i}"] for i in range(5)]) > np.mean([sc[f"new{i}"] for i in range(5, 10)])
+
+
+def test_label_change_or_many_new_videos_force_a_retrain(arch, cvspy, monkeypatch):
+    from autotagtt import train
+    ids, X, _ = _setup_tag(arch)
+    first = train.train_tag("braces", ids, X, top=40)
+    (arch / "data/.appdata/autotag_feedback.json").write_text(json.dumps({"braces": {"rejected": [first["suggestions"][0]["id"]]}}))
+    assert train.train_tag("braces", ids, X, top=40)["mode"] == "trained"      # a new review changes the labels
+    assert train.train_tag("braces", ids, X, top=40)["mode"] == "reused"
+    rng = np.random.default_rng(3)
+    bigX = rng.normal(size=(300, X.shape[1])).astype(np.float32)               # 300 new > max(200, 5%)
+    bigX /= np.linalg.norm(bigX, axis=1, keepdims=True)
+    assert train.train_tag("braces", ids + [f"b{i}" for i in range(300)], np.vstack([X, bigX]), top=40)["mode"] == "trained"
+    monkeypatch.setattr(train, "MAX_AGE_S", -1)                                # a stale cache is never trusted
+    assert train.train_tag("braces", ids, X, top=40)["mode"] == "trained"
+
+
+def test_group_change_invalidates_cache_and_unsure_stays_out(arch, cvspy):
+    from autotagtt import train
+    ids, X, pos = _setup_tag(arch)
+    train.train_tag("braces", ids, X, top=40)
+    write_stars(arch, set(sorted(pos)[:46]))                                   # user tagged one more video
+    r = train.train_tag("braces", ids, X, top=40)
+    assert r["mode"] == "trained"
+    (arch / "data/.appdata/autotag_feedback.json").write_text(json.dumps({"braces": {"unsure": ["v00300"]}}))
+    r2 = train.train_tag("braces", ids, X, top=800)
+    assert "v00300" not in {s["id"] for s in r2["suggestions"]} and "v00300" not in r2["ai"]
+
+
+def test_skipped_tag_verdict_is_cached_and_broken_cache_is_ignored(arch, cvspy):
+    from autotagtt import train
+    ids, X, pos = _setup_tag(arch, known=10)
+    write_stars(arch, {"v00000", "v00001"})
+    assert train.train_tag("braces", ids, X) is None
+    assert train.train_tag("braces", ids, X) is None                           # cached verdict, no work
+    assert cvspy["n"] == 0
+    write_stars(arch, set(sorted(pos)[:45]))
+    r = train.train_tag("braces", ids, X, top=20)
+    assert r["mode"] == "trained"
+    (train._tagdir("braces") / "meta.json").unlink()                           # an interrupted save leaves no commit marker
+    assert train.train_tag("braces", ids, X, top=20)["mode"] == "trained"
+
+
+def test_cache_files_are_private_and_hash_named(arch):
+    from autotagtt import train
+    ids, X, _ = _setup_tag(arch)
+    train.train_tag("braces", ids, X, top=20)
+    d = train._tagdir("braces")
+    assert "braces" not in d.name and stat.S_IMODE(os.stat(d).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(d / "meta.json").st_mode) == 0o600
+
+
+# ───────────── M5: frames ─────────────
+class FakeEmbedder:
+    d = 8
+
+    def encode(self, images):
+        out = []
+        for im in images:
+            a = np.asarray(im.resize((8, 8))).astype(np.float32).reshape(-1)[: self.d]
+            out.append(a / (np.linalg.norm(a) + 1e-9))
+        return np.array(out, np.float32).reshape(len(images), self.d)
+
+
+@pytest.fixture
+def ff_mod(arch, monkeypatch):
+    pytest.importorskip("imageio_ffmpeg")
+    import imageio_ffmpeg
+    monkeypatch.setenv("FFMPEG", imageio_ffmpeg.get_ffmpeg_exe())
+    importlib.reload(importlib.import_module("autotagtt.frames"))
+    from autotagtt import frames
+    return frames
+
+
+def _make_video(frames, path, seconds=4):
+    import subprocess
+    subprocess.run([frames.FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc2=size=160x284:rate=10:duration={seconds}",
+                    "-pix_fmt", "yuv420p", "-c:v", "libx264", str(path)], check=True)
+
+
+def test_extract_frames_and_duration(ff_mod, tmp_path):
+    v = tmp_path / "v.mp4"
+    _make_video(ff_mod, v, 4)
+    assert abs(ff_mod.video_duration(v) - 4.0) < 0.5
+    out = tmp_path / "o"; out.mkdir()
+    paths = ff_mod.extract_frames(v, out)
+    assert len(paths) == ff_mod.K and all(p.stat().st_size > 0 for p in paths)
+    bad = tmp_path / "bad.mp4"; bad.write_bytes(b"not a video")
+    assert ff_mod.video_duration(bad) is None and ff_mod.extract_frames(bad, out) == []
+
+
+def test_embed_videos_stores_cleans_up_and_resumes(ff_mod, arch, tmp_path):
+    import tempfile, glob
+    vids = []
+    for i in range(5):
+        p = tmp_path / f"v{i}.mp4"; _make_video(ff_mod, p, 3); vids.append((f"v{i}", p))
+    bad = tmp_path / "bad.mp4"; bad.write_bytes(b"junk"); vids.append(("bad", bad))
+    store = ff_mod.FrameStore("m")
+    before = set(glob.glob(os.path.join(tempfile.gettempdir(), "atframes_*")))
+    st = ff_mod.embed_videos(FakeEmbedder(), vids, store, mouth=False, threads=2, batch=2, log=lambda *_: None)
+    assert st["done"] == 5 and st["failed"] == 1
+    assert set(glob.glob(os.path.join(tempfile.gettempdir(), "atframes_*"))) == before      # frames never outlive their batch
+    assert store.done_ids() == {f"v{i}" for i in range(5)}
+    ids, F = store.load_pooled()
+    assert F.shape == (5, 3 * 8 + 1) and F.dtype == np.float16 and not np.isnan(F.astype(np.float32)).any()
+    # resume: finished videos are not redone; a video that failed twice is given up on
+    done = store.done_ids()
+    todo = [x for x in vids if x[0] not in done and x[0] not in store.skipped_ids()]
+    assert [t[0] for t in todo] == ["bad"]
+    ff_mod.embed_videos(FakeEmbedder(), todo, store, log=lambda *_: None)
+    assert "bad" in store.skipped_ids() and store.failed()["bad"] == 2
+    n, total = ff_mod.coverage(["v0", "v1", "bad"], store, {"v0": 1, "v1": 1, "bad": 1})
+    assert (n, total) == (3, 3)
+
+
+def test_embed_videos_respects_time_budget(ff_mod, arch, tmp_path):
+    vids = []
+    for i in range(4):
+        p = tmp_path / f"w{i}.mp4"; _make_video(ff_mod, p, 2); vids.append((f"w{i}", p))
+    store = ff_mod.FrameStore("m2")
+    st = ff_mod.embed_videos(FakeEmbedder(), vids, store, budget_s=0, batch=1, log=lambda *_: None)
+    assert st["done"] == 0                                              # budget exhausted before the first batch
+
+
+def test_lower_face_crop_without_faces_is_none(ff_mod):
+    from PIL import Image
+    assert ff_mod.lower_face_crop(Image.new("RGB", (200, 300), "white")) is None
+
+
+def _frame_data(n=600, npos=60, d=8, cover_signal=False, frame_signal=True, seed=2):
+    ids, X, pos = make_data(n=n, npos=npos, seed=seed)
+    if not cover_signal:                                              # cover embeddings carry no information about the tag
+        rng = np.random.default_rng(seed + 1)
+        X = rng.normal(size=X.shape).astype(np.float32)
+        X /= np.linalg.norm(X, axis=1, keepdims=True)
+    rng = np.random.default_rng(seed + 2)
+    F = rng.normal(size=(n, 3 * d + 1)).astype(np.float32)
+    F[:, -1] = 0
+    if frame_signal:
+        pidx = [i for i, v in enumerate(ids) if v in pos]
+        F[pidx, :2 * d] += 2.5
+    return ids, X, pos, F
+
+
+def test_frames_chosen_only_when_they_clearly_help(arch):
+    from autotagtt import train
+    ids, X, pos, F = _frame_data(frame_signal=True)
+    write_stars(arch, set(sorted(pos)[:45]))
+    ff = train.FrameFeatures(ids, F.astype(np.float16), ids, coverage=1.0)
+    r = train.train_tag("braces", ids, X, top=30, ff=ff, force=True)
+    assert r["metrics"]["features"] == "frames" and r["metrics"]["ap"] > 0.5
+    base = train.train_tag("braces", ids, X, top=30, ff=None, force=True)
+    assert r["metrics"]["ap"] > base["metrics"]["ap"] + 0.2 and base["metrics"]["features"] == "cover"
+    ids2, X2, pos2, F2 = _frame_data(frame_signal=False)
+    write_stars(arch, set(sorted(pos2)[:45]))
+    ff2 = train.FrameFeatures(ids2, F2.astype(np.float16), ids2, coverage=1.0)
+    assert train.train_tag("braces", ids2, X2, top=30, ff=ff2, force=True)["metrics"]["features"] == "cover"   # noise never wins
+
+
+def test_frame_features_ignored_until_coverage_is_high(arch):
+    from autotagtt import train
+    ids, X, pos, F = _frame_data(frame_signal=True)
+    write_stars(arch, set(sorted(pos)[:45]))
+    ff = train.FrameFeatures(ids[:300], F[:300].astype(np.float16), ids, coverage=0.5)
+    assert ff.ready is False and ff.kinds() == []
+    assert train.train_tag("braces", ids, X, top=20, ff=ff, force=True)["metrics"]["features"] == "cover"
+
+
+def test_incremental_scoring_with_frame_features_waits_for_frames(arch, cvspy):
+    from autotagtt import train
+    ids, X, pos, F = _frame_data(frame_signal=True)
+    write_stars(arch, set(sorted(pos)[:45]))
+    ff = train.FrameFeatures(ids, F.astype(np.float16), ids, coverage=1.0)
+    assert train.train_tag("braces", ids, X, top=20, ff=ff)["metrics"]["features"] == "frames"
+    n1 = cvspy["n"]
+    rng = np.random.default_rng(4)
+    nx = rng.normal(size=(6, X.shape[1])).astype(np.float32)
+    nids = [f"n{i}" for i in range(6)]
+    nF = rng.normal(size=(6, F.shape[1])).astype(np.float32); nF[:, -1] = 0
+    ff2 = train.FrameFeatures(ids + nids[:3], np.vstack([F, nF[:3]]).astype(np.float16), ids + nids, coverage=1.0)   # only 3 of 6 have frames
+    r = train.train_tag("braces", ids + nids, np.vstack([X, nx]), top=900, ff=ff2)
+    assert r["mode"] == "incremental" and cvspy["n"] == n1 and r["metrics"]["incremental_new"] == 3
+
+
+def test_trial_selection_and_report(arch):
+    from autotagtt import train
+    ids, X, pos, F = _frame_data(n=900, npos=90, frame_signal=True)
+    write_stars(arch, set(sorted(pos)[:80]))
+    chosen = train.select_trial(ids, ["braces"], per_tag=60, random_extra=300)
+    assert len(chosen & set(sorted(pos)[:80])) >= 60 and len(chosen) >= 300
+    assert json.loads(train.TRIAL_IDS.read_text()) == sorted(chosen)
+    ff = train.FrameFeatures(ids, F.astype(np.float16), ids, coverage=0.2)
+    rep = train.trial_report(["braces"], ids, X, ff, chosen)
+    row = rep["braces"]
+    assert row["ap_frames"] > row["ap_cover"] + 0.2 and "ap_mouth" not in row
+    assert json.loads(train.TRIAL_REPORT.read_text())["braces"]["n_pos"] == row["n_pos"]
+
+
+def test_frames_config_defaults_and_validation(arch, ff_mod):
+    assert ff_mod.frames_config() == {"mode": "off", "mouth": False, "budget_min": 120}
+    ff_mod.CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    ff_mod.CONFIG.write_text(json.dumps({"mode": "full", "mouth": True, "budget_min": 5}))
+    assert ff_mod.frames_config() == {"mode": "full", "mouth": True, "budget_min": 120}   # out-of-range budget falls back
+    ff_mod.CONFIG.write_text(json.dumps({"mode": "everything"}))
+    assert ff_mod.frames_config()["mode"] == "off"

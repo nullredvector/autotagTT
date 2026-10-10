@@ -21,11 +21,36 @@ class CoverDS:
         return self.pre(img), vid, True
 
 
+_MODEL = {}
+
+
 def load_model(model=DEFAULT_MODEL, pretrained=DEFAULT_PRETRAINED):
-    import open_clip
-    m, _, pre = open_clip.create_model_and_transforms(model, pretrained=pretrained, precision="fp16", device="cuda")
-    m.eval()
-    return m, pre, None
+    """Loaded once per process; the covers and frames steps share it."""
+    key = (model, pretrained)
+    if key not in _MODEL:
+        import open_clip
+        m, _, pre = open_clip.create_model_and_transforms(model, pretrained=pretrained, precision="fp16", device="cuda")
+        m.eval()
+        _MODEL[key] = (m, pre, None)
+    return _MODEL[key]
+
+
+class ImageEmbedder:
+    """encode(list of PIL images) -> (n, d) float32, L2-normalised. Used for video frames and face crops."""
+
+    def __init__(self, model=DEFAULT_MODEL, pretrained=DEFAULT_PRETRAINED, batch=64):
+        self.m, self.pre, _ = load_model(model, pretrained)
+        self.batch = batch
+
+    def encode(self, images):
+        import torch
+        out = []
+        with torch.no_grad():
+            for s in range(0, len(images), self.batch):
+                x = torch.stack([self.pre(im) for im in images[s:s + self.batch]]).cuda().half()
+                f = torch.nn.functional.normalize(self.m.encode_image(x).float(), dim=-1)
+                out.append(f.cpu().numpy())
+        return np.concatenate(out) if out else np.zeros((0, 1), np.float32)
 
 
 def embed_covers(model=DEFAULT_MODEL, pretrained=DEFAULT_PRETRAINED, batch=256, shard=4096, workers=8, limit=None):
