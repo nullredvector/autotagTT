@@ -28,3 +28,13 @@ Real SigLIP inference has not been run yet.
 ## Review decisions
 `accepted` → positive label, `rejected` → confirmed negative (weight 5), `unsure` → **no label**: the video is set aside in
 Starplayer, training ignores it, and it stays hidden from Pending until moved back.
+
+## Multiple tags and AI tags
+- `data/.appdata/autotag_tags.json` (`{"enabled": [group names]}`) lists the groups to learn. Starplayer's "Tags…" picker on the
+  review page writes it; default is `braces`. One embedding pass serves every tag; each tag only costs a small classifier.
+- Per tag: skipped below 30 positives, and "weak" (no suggestions/AI tags) if cross-validated AUC < 0.80.
+- Logs anonymise tag names (`tag-xxxxxx`); only `braces` is printed by name.
+- `ai_tags.json` holds model labels **separate from human groups**: `{"videos": {id: [[tag, score], ...]}}`. A video is
+  AI-tagged above a per-tag cutoff: the point where precision of the latest 50 reviewed decisions (walking down the ranking) stays
+  >= 80%. With under 30 reviews for a tag, only its top 100 are tagged ("unvalidated").
+  Starplayer hides an AI tag once the video is in the same-named group or you accepted/rejected it.
