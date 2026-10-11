@@ -108,6 +108,19 @@ chk "frames: budget string -> 400" "$(fp '{"mode":"full","mouth":false,"budget_m
 chk "frames: cross-origin -> 403" "$(fp '{"mode":"full","mouth":false}' -H 'Origin: http://evil.example')" 403
 setst '{"state":"idle","frames":{"stats":{"done":120,"total":1000,"rate":2.5,"mode":"trial","ts":1},"trial":{"scenery":{"n_pos":40,"n":300,"ap_cover":0.2,"ap_frames":0.5}}}}' 0
 chk "frames: stats and trial exposed" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;f=json.load(sys.stdin)["frames"];print(f["stats"]["done"],f["trial"]["scenery"]["ap_frames"])')" "120 0.5"
+wp() { python3 -c "import json,time,sys;d=json.loads(sys.argv[1]);d.setdefault('ts',time.time()-float(sys.argv[2]));json.dump(d,open('$AT/frames_progress.json','w'))" "$1" "${2:-0}"; }
+fprog() { curl -s $B/api/autotag/run | python3 -c "$1"; }
+wp '{"mode":"full","total":58000,"covered":29000,"session_done":500,"session_target":2000,"rate":12.5,"running":true}' 0
+chk "progress: live values exposed" "$(fprog 'import sys,json;p=json.load(sys.stdin)["frames"]["progress"];print(p["mode"],p["total"],p["covered"],p["sessionDone"],p["running"],p["threshold"])')" "full 58000 29000 500 True 0.95"
+wp '{"mode":"full","total":58000,"covered":29000,"running":true}' 600
+chk "progress: stale report is not 'running'" "$(fprog 'import sys,json;print(json.load(sys.stdin)["frames"]["progress"]["running"])')" False
+wp '{"mode":"bogus","total":"x","covered":-5,"session_done":"a","rate":-1,"running":"yes"}' 0
+chk "progress: junk is sanitised" "$(fprog 'import sys,json;p=json.load(sys.stdin)["frames"]["progress"];print(p["mode"],p["total"],p["covered"],p["sessionDone"],p["rate"],p["running"])')" "off 0 0 0 0 False"
+wp '{"mode":"full","total":100,"covered":500,"running":false}' 0
+chk "progress: covered never exceeds total" "$(fprog 'import sys,json;p=json.load(sys.stdin)["frames"]["progress"];print(p["covered"])')" 100
+rm -f $AT/frames_progress.json
+chk "progress: absent file -> null" "$(fprog 'import sys,json;print(json.load(sys.stdin)["frames"]["progress"])')" None
+chk "progress: no paths in the status" "$(curl -s $B/api/autotag/run | grep -c '/mnt\\|/archive')" 0
 rm -f $AT/frames.json
 # long silent job: status.json heartbeat is stale, but the worker's own heartbeat.json is fresh -> still online
 setst '{"state":"running","phase":"training","detail":"tag 3 of 11"}' 600
