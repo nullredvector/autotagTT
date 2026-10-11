@@ -15,6 +15,7 @@ FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 MAX_ATTEMPTS = 2                        # a video that yields no frames this many times is skipped from then on
 COVERAGE_READY = 0.95                   # frame features are used for training once this share of videos is done
 STATS = OUT / "frames_stats.json"
+PROGRESS = OUT / "frames_progress.json"      # live, updated after every batch; Starplayer shows it on every device
 TRIAL_IDS = OUT / "frames_trial_ids.json"
 TRIAL_REPORT = OUT / "frames_trial.json"
 CONFIG = OUT / "frames.json"            # {"mode": "off|trial|full", "mouth": bool, "budget_min": int}
@@ -161,7 +162,7 @@ def _private_tmp():
     return tempfile.mkdtemp(prefix="atframes_", dir=base)       # mkdtemp is 0700
 
 
-def embed_videos(embedder, todo, store, mouth=False, budget_s=None, threads=8, batch=32, log=print):
+def embed_videos(embedder, todo, store, mouth=False, budget_s=None, threads=8, batch=32, log=print, on_progress=None):
     """todo: [(video_id, path)]. Resumable (finished batches are committed); stops after budget_s seconds."""
     t0 = time.time()
     done = failed = 0
@@ -223,6 +224,11 @@ def embed_videos(embedder, todo, store, mouth=False, budget_s=None, threads=8, b
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)         # frames never outlive their batch
             el = max(time.time() - t0, 1e-6)
+            if on_progress:
+                try:
+                    on_progress({"session_done": done, "session_failed": failed, "session_target": len(todo), "elapsed": el})
+                except Exception:
+                    pass                                        # progress reporting must never stop the scan
             log(f"  frames {done}/{len(todo)}  {done / el:.1f} videos/s  eta {(len(todo) - done - failed) / max(done / el, 1e-6) / 60:.1f} min")
     return {"done": done, "failed": failed, "seconds": time.time() - t0}
 
@@ -234,6 +240,12 @@ def coverage(cover_ids, store=None, videos=None):
     ids = [v for v in cover_ids if v in videos]
     have = store.done_ids() | store.skipped_ids()
     return sum(1 for v in ids if v in have), len(ids)
+
+
+def write_progress(mode, total, covered, session_done=0, session_target=0, rate=0.0, running=True):
+    """Small atomic file the Starplayer server reads, so any device (and any page reload) shows the same live progress."""
+    write_json_atomic(PROGRESS, {"mode": mode, "total": total, "covered": covered, "session_done": session_done,
+                                 "session_target": session_target, "rate": round(rate, 4), "running": running, "ts": time.time()})
 
 
 def write_stats(done, total, rate, mode):

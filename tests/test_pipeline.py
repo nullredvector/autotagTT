@@ -631,8 +631,35 @@ def test_run_orchestration_trial_then_full_then_reuse(ff_mod, arch, monkeypatch,
     ff_mod.CONFIG.write_text(json.dumps({"mode": "full", "mouth": False, "budget_min": 30}))
     cli._train_and_write(a, ["braces"], cover_ids, Xc, new_covers=0, with_frames=True)
     assert json.loads((out / "run_summary.json").read_text())["frames_used"] is True    # coverage is complete, frames are used
+    prog = json.loads((out / "frames_progress.json").read_text())
+    assert prog["running"] is False and prog["covered"] == prog["total"] == 90 and prog["mode"] == "full"
     cli._train_and_write(a, ["braces"], cover_ids, Xc, new_covers=0, with_frames=True)
     s3 = json.loads((out / "run_summary.json").read_text())
     assert s3["changed"] is False and s3["modes"] == {"reused": 1}                       # a quiet night: nothing recomputed
     ai = json.loads((out / "ai_tags.json").read_text())
     assert "videos" in ai and stat.S_IMODE(os.stat(out / "autotag.json").st_mode) == 0o600
+
+
+def test_frame_progress_is_reported_after_every_batch(ff_mod, arch, tmp_path):
+    vids = []
+    for i in range(5):
+        p = tmp_path / f"p{i}.mp4"; _make_video(ff_mod, p, 2); vids.append((f"p{i}", p))
+    seen = []
+    store = ff_mod.FrameStore("mp")
+    ff_mod.embed_videos(FakeEmbedder(), vids, store, batch=2, log=lambda *_: None, on_progress=seen.append)
+    assert [p["session_done"] for p in seen] == [2, 4, 5] and all(p["session_target"] == 5 for p in seen)
+    assert seen[-1]["elapsed"] > 0
+    # a broken progress callback never stops the scan
+    store2 = ff_mod.FrameStore("mp2")
+    def boom(_): raise RuntimeError("x")
+    st = ff_mod.embed_videos(FakeEmbedder(), vids[:2], store2, batch=1, log=lambda *_: None, on_progress=boom)
+    assert st["done"] == 2
+
+
+def test_progress_file_is_atomic_private_and_complete(ff_mod, arch):
+    ff_mod.write_progress("full", 100, 40, 10, 60, 2.5, running=True)
+    d = json.loads(ff_mod.PROGRESS.read_text())
+    assert d["covered"] == 40 and d["total"] == 100 and d["running"] is True and d["session_target"] == 60 and d["rate"] == 2.5 and d["ts"] > 0
+    assert stat.S_IMODE(os.stat(ff_mod.PROGRESS).st_mode) == 0o600
+    ff_mod.write_progress("full", 100, 100, 60, 60, 2.5, running=False)
+    assert json.loads(ff_mod.PROGRESS.read_text())["running"] is False

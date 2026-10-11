@@ -64,7 +64,7 @@ def _frames_step(a, ids, X, tags, process=True):
     """Frame analysis as configured in kashibox: off | trial | full. Returns FrameFeatures or None."""
     import time
     from .archive import find_videos
-    from .frames import FrameStore, frames_config, embed_videos, coverage, write_stats
+    from .frames import FrameStore, frames_config, embed_videos, coverage, write_stats, write_progress
     from .train import FrameFeatures, select_trial, trial_report
     cfg = frames_config()
     fstore = FrameStore(a.model)
@@ -77,17 +77,27 @@ def _frames_step(a, ids, X, tags, process=True):
         else:
             todo = [(v, videos[v]) for v in sorted((v for v in ids if v in videos), reverse=True) if v not in have]   # newest first
         print(f"frames: mode={cfg['mode']} mouth={cfg['mouth']} {len(todo)} videos to do", flush=True)
+        done0, total = coverage(ids, fstore, videos)
+        mode = cfg["mode"]
+        write_progress(mode, total, done0, 0, len(todo), 0.0, running=True)      # visible at once, before the model loads
         if todo:
             from .embed import ImageEmbedder
-            from .frames import embed_videos
             threads = int(os.environ.get("AUTOTAGTT_THREADS", "8"))
+
+            def report(p):
+                rate = p["session_done"] / max(p["elapsed"], 1e-6)
+                write_progress(mode, total, done0 + p["session_done"], p["session_done"], p["session_target"], rate, running=True)
+
             st = embed_videos(ImageEmbedder(a.model, a.pretrained), todo, fstore, mouth=cfg["mouth"],
-                              budget_s=cfg["budget_min"] * 60, threads=threads)
+                              budget_s=cfg["budget_min"] * 60, threads=threads, on_progress=report)
             done, total = coverage(ids, fstore, videos)
-            write_stats(done, total, st["done"] / max(st["seconds"], 1e-6), cfg["mode"])
+            rate = st["done"] / max(st["seconds"], 1e-6)
+            write_stats(done, total, rate, mode)
+            write_progress(mode, total, done, st["done"], len(todo), rate, running=False)
         else:
             done, total = coverage(ids, fstore, videos)
-            write_stats(done, total, 0, cfg["mode"])
+            write_stats(done, total, 0, mode)
+            write_progress(mode, total, done, 0, 0, 0.0, running=False)
     fids, F = fstore.load_pooled()
     if not len(fids):
         return None
