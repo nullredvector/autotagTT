@@ -19,7 +19,7 @@ PROGRESS = OUT / "frames_progress.json"      # live, updated after every batch; 
 TRIAL_IDS = OUT / "frames_trial_ids.json"
 TRIAL_REPORT = OUT / "frames_trial.json"
 CONFIG = OUT / "frames.json"            # {"mode": "off|trial|full", "mouth": bool, "budget_min": int}
-DEFAULT_CONFIG = {"mode": "off", "mouth": False, "budget_min": 120}
+DEFAULT_CONFIG = {"mode": "off", "mouth": False, "text": True, "budget_min": 120}
 
 
 def frames_config():
@@ -29,7 +29,7 @@ def frames_config():
         c = {}
     mode = c.get("mode") if c.get("mode") in ("off", "trial", "full") else "off"
     b = c.get("budget_min")
-    return {"mode": mode, "mouth": c.get("mouth") is True,
+    return {"mode": mode, "mouth": c.get("mouth") is True, "text": c.get("text") is not False,       # captions: on unless switched off
             "budget_min": b if isinstance(b, int) and 10 <= b <= 600 else DEFAULT_CONFIG["budget_min"]}
 
 

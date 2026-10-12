@@ -109,14 +109,28 @@ def _frames_step(a, ids, X, tags, process=True):
     return ff
 
 
+def _text_step(a, ids, process=True):
+    """Caption embeddings (on unless switched off in the Run panel). Returns TextFeatures or None."""
+    from .frames import frames_config
+    from .text import embed_texts, LazyTextEmbedder
+    from .train import TextFeatures
+    if not frames_config()["text"]:
+        return None
+    if process:
+        embed_texts(LazyTextEmbedder(a.model, a.pretrained), ids, a.model)
+    tids, T = EmbStore(a.model, "text").load()
+    return TextFeatures(tids, T, ids) if len(tids) else None
+
+
 def _train_and_write(a, tags, ids, X, new_covers, with_frames):
     from .train import train_tag, write_suggestions, write_ai_tags
     t0 = time.time()
     ff = _frames_step(a, ids, X, tags, process=with_frames)
+    tf = _text_step(a, ids, process=with_frames)
     lazy = _Lazy(X)
     res, modes = {}, {}
     for t in tags:
-        r = train_tag(t, ids, X, top=a.top, grp=lazy, ff=ff, model=a.model)
+        r = train_tag(t, ids, X, top=a.top, grp=lazy, ff=ff, tf=tf, model=a.model)
         if r is not None:
             res[t] = r
             modes[r["mode"]] = modes.get(r["mode"], 0) + 1
@@ -126,7 +140,7 @@ def _train_and_write(a, tags, ids, X, new_covers, with_frames):
     write_ai_tags(res, a.model)
     changed = bool(new_covers) or modes.get("trained", 0) > 0 or modes.get("incremental", 0) > 0
     write_json_atomic(OUT / "run_summary.json", {"changed": changed, "new_covers": new_covers, "modes": modes,
-                                                 "frames_used": bool(ff and ff.ready), "seconds": round(time.time() - t0)})
+                                                 "frames_used": bool(ff and ff.ready), "text_used": bool(tf and tf.ready), "seconds": round(time.time() - t0)})
     print(f"run summary: new_covers={new_covers} " + " ".join(f"{k}={v}" for k, v in modes.items()), flush=True)
 
 

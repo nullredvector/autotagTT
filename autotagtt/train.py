@@ -14,10 +14,17 @@ AI_MIN_REVIEWED = 30
 AI_WINDOW = 50                                  # precision is judged on the most recent N reviewed videos going down the ranking
 AI_UNVALIDATED_TOP = 100                        # no usable reviews yet: only the top N per tag
 CACHE = OUT / "cache"                           # per-tag scores + weights (private, hashed names)
-CODE_VERSION = 3                                # bump when scoring logic changes: invalidates every cache
+CODE_VERSION = 4                                # bump when scoring logic changes: invalidates every cache
 MAX_AGE_S = 14 * 86400                          # retrain at least every two weeks even if nothing changed
 NEW_FRACTION = 0.05                             # more new videos than this share of the scored set: retrain instead
 MIN_FEATURE_GAIN = 0.01                         # AP a richer feature set must add before it replaces cover-only
+MIN_REL_GAIN = 0.25                             # ...or +25% relative AP together with a small AUC gain (rare tags have tiny absolute AP)
+MIN_AUC_GAIN = 0.01
+STRONG_AUC_GAIN = 0.02                          # an AUC gain this large is enough on its own
+REVIEW_ONLY_TOP = 100                           # weak tags still get a short low-confidence list so you can review them and teach them
+HOPELESS_AUC = 0.65                             # below this (or too few positives) a tag is flagged as not worth keeping
+HOPELESS_POSITIVES = 40
+TEXT_READY_SHARE = 0.5                          # captions are used when at least this share of videos has one
 MIN_MOUTH_SHARE = 0.05                          # share of videos needing a lower-face crop before the 'mouth' set is considered
 COVERAGE_READY = 0.95                           # frame features are used once this share of videos has them
 TRIAL_IDS = OUT / "frames_trial_ids.json"
@@ -106,8 +113,54 @@ class FrameFeatures:
         return "cover" + ("+frames" if self.ready else "") + ("+mouth" if self.mouth_ready else "")
 
 
-def _features(kind, ids, X, ff):
-    return X if kind == "cover" else np.hstack([X, ff.block(ids, kind)])
+class TextFeatures:
+    """Caption embeddings aligned by video id. Videos without a caption get zeros."""
+
+    def __init__(self, ids, T, cover_ids):
+        self.index = {v: i for i, v in enumerate(ids)}
+        self.T = T
+        have = sum(1 for v in cover_ids if v in self.index)
+        self.coverage = have / max(len(cover_ids), 1)
+        self.ready = len(ids) > 0 and self.coverage >= TEXT_READY_SHARE
+
+    def block(self, ids):
+        out = np.zeros((len(ids), self.T.shape[1]), np.float32)
+        for r, v in enumerate(ids):
+            i = self.index.get(v)
+            if i is not None:
+                out[r] = self.T[i]
+        return out
+
+
+def _signature(ff, tf):
+    return "cover" + ("+frames" if ff is not None and ff.ready else "") + ("+mouth" if ff is not None and ff.mouth_ready else "") \
+        + ("+text" if tf is not None and tf.ready else "")
+
+
+def _features(kind, ids, X, ff, tf=None):
+    """kind: 'cover' or parts joined by '+' (frames, mouth, text), always on top of the cover embedding."""
+    if kind == "cover":
+        return X
+    blocks = [X]
+    for part in kind.split("+"):
+        blocks.append(tf.block(ids) if part == "text" else ff.block(ids, part))
+    return np.hstack(blocks)
+
+
+def _clearly_better(ap, auc, base_ap, base_auc):
+    """A richer feature set replaces the simpler one only on a clear gain; rare tags have tiny absolute AP, so relative
+    AP and AUC count too."""
+    if ap > base_ap + MIN_FEATURE_GAIN or auc >= base_auc + STRONG_AUC_GAIN:
+        return True
+    return ap >= base_ap * (1 + MIN_REL_GAIN) and auc >= base_auc + MIN_AUC_GAIN
+
+
+def _verdict(metrics):
+    if metrics["gate"] == "ok":
+        return "usable"
+    if metrics["auc"] < HOPELESS_AUC or metrics["positives"] < HOPELESS_POSITIVES:
+        return "hopeless"
+    return "review_only"
 
 
 def _cv(Xf, y, w, splits, C):
@@ -173,17 +226,22 @@ def _outputs(tag, ids, scores, pos_ids, accepted, rejected, unsure, metrics, top
         sugg.append({"id": v, "score": round(float(scores[i]), 4), "status": "pending"})
         if len(sugg) >= top:
             break
+    metrics["verdict"] = _verdict(metrics)
     if metrics["gate"] == "weak":
-        sugg = []
+        # Weak tags get no AI tags, but a promising one still gets a short low-confidence list so the user can review it:
+        # reviewing is what teaches it (this is how braces went from AUC 0.70 to 0.95)
+        sugg = sugg[:REVIEW_ONLY_TOP] if metrics["verdict"] == "review_only" else []
+        metrics["review_only"] = bool(sugg)
         ai = {"cutoff": None, "mode": "off", "items": {}}
     else:
+        metrics["review_only"] = False
         ai = ai_tags(ids, scores, y, accepted, rejected, unsure)
     metrics["ai_mode"], metrics["ai_cutoff"], metrics["ai_count"] = ai["mode"], ai["cutoff"], len(ai["items"])
     print(f"  ai tags: mode={ai['mode']} cutoff={ai['cutoff']} count={len(ai['items'])}", flush=True)
     return {"suggestions": sugg, "metrics": metrics, "ai": ai["items"]}
 
 
-def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=None, ff=None, model="", force=False):
+def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=None, ff=None, tf=None, model="", force=False):
     """Train (or reuse) one tag. Returns None (skipped) or {"suggestions","metrics","ai","mode"} where mode is
     trained | incremental | reused. ff: FrameFeatures or None. grp: duplicate groups aligned with ids (computed once per run)."""
     if len(ids) == 0:
@@ -195,7 +253,7 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     accepted, rejected, unsure = load_feedback(tag)
     unsure -= groups[tag] | accepted | rejected      # an explicit label always wins over "not sure"
     pos_ids = groups[tag] | accepted
-    signature = ff.signature() if ff is not None else "cover"
+    signature = _signature(ff, tf)
     fp = _fingerprint(model, signature, pos_ids, rejected, unsure)
 
     # unsure videos are left out of training and scoring entirely
@@ -214,7 +272,7 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
         new_idx = [i for i, v in enumerate(cur_ids) if v not in have]
         few = len(new_idx) <= max(200, NEW_FRACTION * len(cache["ids"]))
         if meta["metrics"]["gate"] == "weak" or few:
-            return _reuse(tag, meta, cache, cur_ids, X[keep] if len(new_idx) else None, ff, new_idx, pos_ids, accepted, rejected, unsure, top)
+            return _reuse(tag, meta, cache, cur_ids, X[keep] if len(new_idx) else None, ff, tf, new_idx, pos_ids, accepted, rejected, unsure, top)
 
     # ── full training ──
     X = X[keep].astype(np.float32)
@@ -237,16 +295,26 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     skf = StratifiedGroupKFold(folds, shuffle=True, random_state=seed)
     splits = list(skf.split(X, y, grp))
 
-    feat, aps = "cover", {}
-    if ff is not None and ff.kinds():
+    feat, aps, aucs = "cover", {}, {}
+    singles = (ff.kinds() if ff is not None else []) + (["text"] if tf is not None and tf.ready else [])
+    if singles:
         quick = list(StratifiedGroupKFold(3, shuffle=True, random_state=seed).split(X, y, grp))
-        for kind in ["cover"] + ff.kinds():
-            aps[kind] = float(average_precision_score(y, _cv(_features(kind, ids, X, ff), y, w, quick, cs[0])))
-        for kind in ff.kinds():                       # a richer feature set must clearly beat the simpler one
-            if aps[kind] > aps[feat] + MIN_FEATURE_GAIN:
-                feat = kind
-        print(f"  features: {feat} (quick AP { {k: round(v, 3) for k, v in aps.items()} })", flush=True)
-    Xf = _features(feat, ids, X, ff) if feat != "cover" else X
+
+        def quick_eval(kind):
+            o = _cv(_features(kind, ids, X, ff, tf), y, w, quick, cs[0])
+            aps[kind], aucs[kind] = float(average_precision_score(y, o)), float(roc_auc_score(y, o))
+
+        for kind in ["cover"] + singles:
+            quick_eval(kind)
+        good = [k for k in singles if _clearly_better(aps[k], aucs[k], aps["cover"], aucs["cover"])]
+        if "frames" in good and "text" in good:                       # both help on their own: try them together
+            quick_eval("frames+text")
+            if _clearly_better(aps["frames+text"], aucs["frames+text"], max(aps[k] for k in ("frames", "text")), max(aucs[k] for k in ("frames", "text"))):
+                good.append("frames+text")
+        if good:
+            feat = max(good, key=lambda k: (aucs[k], aps[k]))
+        print(f"  features: {feat} (quick AP { {k: round(v, 4) for k, v in aps.items()} } AUC { {k: round(v, 3) for k, v in aucs.items()} })", flush=True)
+    Xf = _features(feat, ids, X, ff, tf) if feat != "cover" else X
 
     best = None
     for C in cs:
@@ -265,7 +333,8 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     metrics = {"C": C, "ap": float(ap), "ap_ci95": _boot_ci(ypos, lambda v: average_precision_score(v, -np.arange(len(v)))) if P else None,
                "auc": float(roc_auc_score(y, oof)), "positives": P, "n": len(ids),
                "reviewed_rejected": n_rej, "excluded_unsure": n_unsure, "reviewed_accepted": len(accepted & set(idx)),
-               "features": feat, "feature_aps": {k: round(v, 4) for k, v in aps.items()}}
+               "features": feat, "feature_aps": {k: round(v, 4) for k, v in aps.items()},
+               "feature_aucs": {k: round(v, 4) for k, v in aucs.items()}}
     for frac in (0.01, 0.02, 0.05, 0.10):
         k = max(1, int(len(ids) * frac))
         metrics[f"recall@top{frac:.0%}"] = float(ypos[:k].sum() / P)
@@ -275,7 +344,7 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     metrics["gate"] = "ok" if metrics["auc"] >= MIN_AUC else "weak"
     print("  " + json.dumps(metrics), flush=True)
     if metrics["gate"] == "weak":
-        print(f"  gate: weak (AUC < {MIN_AUC}); no suggestions or AI tags for this tag", flush=True)
+        print(f"  gate: weak (AUC < {MIN_AUC}); no AI tags for this tag", flush=True)
 
     sc, clf = _fit(Xf, y, w, C)
     wt, b = _linear(sc, clf)
@@ -285,7 +354,7 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     return out
 
 
-def _reuse(tag, meta, cache, cur_ids, Xcur, ff, new_idx, pos_ids, accepted, rejected, unsure, top):
+def _reuse(tag, meta, cache, cur_ids, Xcur, ff, tf, new_idx, pos_ids, accepted, rejected, unsure, top):
     """Same labels as last time: keep the saved scores and only score videos added since."""
     metrics = dict(meta["metrics"])
     present = set(cur_ids)
@@ -298,9 +367,10 @@ def _reuse(tag, meta, cache, cur_ids, Xcur, ff, new_idx, pos_ids, accepted, reje
         Xn = Xcur[new_idx].astype(np.float32)
         nids = [cur_ids[i] for i in new_idx]
         if feat != "cover":
-            have = [j for j, v in enumerate(nids) if v in ff.index]        # score them once their frames exist
+            needs_frames = "frames" in feat or "mouth" in feat
+            have = [j for j, v in enumerate(nids) if not needs_frames or v in ff.index]      # score them once their frames exist
             nids, Xn = [nids[j] for j in have], Xn[have]
-            Xn = _features(feat, nids, Xn, ff) if len(nids) else Xn
+            Xn = _features(feat, nids, Xn, ff, tf) if len(nids) else Xn
         if nids:
             ns = Xn @ cache["w"] + meta["b"]
             ids = ids + nids

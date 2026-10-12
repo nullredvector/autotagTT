@@ -59,7 +59,7 @@ def summarize():
     d = _read(OUT / "autotag.json") or {}
     out = {}
     for tag, m in (d.get("_meta", {}).get("metrics") or {}).items():
-        out[tag] = {k: m.get(k) for k in ("positives", "auc", "gate", "ai_count", "ai_mode", "reviewed_accepted", "reviewed_rejected")}
+        out[tag] = {k: m.get(k) for k in ("positives", "auc", "gate", "ai_count", "ai_mode", "reviewed_accepted", "reviewed_rejected", "verdict", "review_only", "features")}
         out[tag]["pending"] = len(d.get(tag) or [])
     return out
 

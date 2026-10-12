@@ -53,6 +53,26 @@ class ImageEmbedder:
         return np.concatenate(out) if out else np.zeros((0, 1), np.float32)
 
 
+class TextEmbedder:
+    """encode(list of captions) -> (n, d) float32, L2-normalised, in the same space as the image embeddings (SigLIP text tower)."""
+
+    def __init__(self, model=DEFAULT_MODEL, pretrained=DEFAULT_PRETRAINED, batch=256):
+        import open_clip
+        self.m, _, _ = load_model(model, pretrained)
+        self.tok = open_clip.get_tokenizer(model)
+        self.batch = batch
+
+    def encode(self, texts):
+        import torch
+        out = []
+        with torch.no_grad():
+            for s in range(0, len(texts), self.batch):
+                t = self.tok([x[:300] for x in texts[s:s + self.batch]]).cuda()
+                f = torch.nn.functional.normalize(self.m.encode_text(t).float(), dim=-1)
+                out.append(f.cpu().numpy())
+        return np.concatenate(out) if out else np.zeros((0, 1), np.float32)
+
+
 def embed_covers(model=DEFAULT_MODEL, pretrained=DEFAULT_PRETRAINED, batch=256, shard=4096, workers=8, limit=None):
     store = EmbStore(model, "cover")
     covers = find_covers()

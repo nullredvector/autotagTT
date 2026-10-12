@@ -145,7 +145,7 @@ def test_multi_tag_config_labels_gate_and_ai_tags(arch):
     importlib.reload(archive)
     ids, X, pos = make_data(n=800, npos=80)
     rng = np.random.default_rng(5)
-    noise = set(rng.choice(ids, 60, replace=False).tolist())          # a tag with no visual signal
+    noise = set(rng.choice(ids[100:], 60, replace=False).tolist())      # a tag with no visual signal (kept clear of the 80 signal videos)
     write_multi(arch, {"braces": set(sorted(pos)[:60]), "Secret Tag": noise, "tiny": {"v00001", "v00002"}})
     (arch / "data/.appdata/autotag_tags.json").write_text(json.dumps({"enabled": ["Braces", "secret tag", "tiny"]}))
     assert archive.enabled_tags() == ["braces", "secret tag", "tiny"]
@@ -153,7 +153,7 @@ def test_multi_tag_config_labels_gate_and_ai_tags(arch):
     res = {t: train.train_tag(t, ids, X, top=30) for t in archive.enabled_tags()}
     assert res["tiny"] is None                                        # too few positives
     assert res["braces"]["metrics"]["gate"] == "ok" and res["secret tag"]["metrics"]["gate"] == "weak"
-    assert res["secret tag"]["suggestions"] == [] and res["secret tag"]["ai"] == {}
+    assert res["secret tag"]["suggestions"] == [] and res["secret tag"]["ai"] == {} and res["secret tag"]["metrics"]["verdict"] == "hopeless"
     ai = res["braces"]["ai"]
     assert ai and not (set(ai) & set(sorted(pos)[:60]))               # never tags videos already in the human group
     assert res["braces"]["metrics"]["ai_mode"] == "unvalidated" and len(ai) <= train.AI_UNVALIDATED_TOP
@@ -572,10 +572,12 @@ def test_trial_selection_and_report(arch):
 
 
 def test_frames_config_defaults_and_validation(arch, ff_mod):
-    assert ff_mod.frames_config() == {"mode": "off", "mouth": False, "budget_min": 120}
+    assert ff_mod.frames_config() == {"mode": "off", "mouth": False, "text": True, "budget_min": 120}
     ff_mod.CONFIG.parent.mkdir(parents=True, exist_ok=True)
     ff_mod.CONFIG.write_text(json.dumps({"mode": "full", "mouth": True, "budget_min": 5}))
-    assert ff_mod.frames_config() == {"mode": "full", "mouth": True, "budget_min": 120}   # out-of-range budget falls back
+    assert ff_mod.frames_config() == {"mode": "full", "mouth": True, "text": True, "budget_min": 120}   # out-of-range budget falls back
+    ff_mod.CONFIG.write_text(json.dumps({"mode": "off", "text": False}))
+    assert ff_mod.frames_config()["text"] is False
     ff_mod.CONFIG.write_text(json.dumps({"mode": "everything"}))
     assert ff_mod.frames_config()["mode"] == "off"
 
@@ -663,3 +665,135 @@ def test_progress_file_is_atomic_private_and_complete(ff_mod, arch):
     assert stat.S_IMODE(os.stat(ff_mod.PROGRESS).st_mode) == 0o600
     ff_mod.write_progress("full", 100, 100, 60, 60, 2.5, running=False)
     assert json.loads(ff_mod.PROGRESS.read_text())["running"] is False
+
+
+
+# ───────────── weak tags: review-only tier, hopeless flag, fairer feature rule, captions ─────────────
+def _weak_data(n=1500, npos=80, shift=0.4, d=32, seed=3):
+    rng = np.random.default_rng(seed)
+    ids = [f"v{i:05d}" for i in range(n)]
+    X = rng.normal(size=(n, d)).astype(np.float32)
+    direction = rng.normal(size=d); direction /= np.linalg.norm(direction)
+    X[:npos] += shift * direction * 3
+    X /= np.linalg.norm(X, axis=1, keepdims=True)
+    return ids, X, set(ids[:npos])
+
+
+def test_weak_but_promising_tag_gets_a_review_only_list(arch):
+    from autotagtt import train
+    ids, X, pos = _weak_data()
+    write_stars(arch, pos)
+    r = train.train_tag("braces", ids, X, top=300, force=True)
+    m = r["metrics"]
+    assert m["gate"] == "weak" and m["verdict"] == "review_only" and m["review_only"] is True and 0.65 <= m["auc"] < 0.8
+    assert len(r["suggestions"]) == train.REVIEW_ONLY_TOP and r["ai"] == {}            # a short list to review, never AI tags
+    (arch / "data/.appdata/autotag_feedback.json").write_text(json.dumps({"braces": {"rejected": [r["suggestions"][0]["id"]]}}))
+    r2 = train.train_tag("braces", ids, X, top=300)
+    assert r2["suggestions"][0]["id"] != r["suggestions"][0]["id"] and len(r2["suggestions"]) == train.REVIEW_ONLY_TOP
+    assert r2["ai"] == {}
+
+
+def test_tags_with_too_few_positives_or_no_signal_are_flagged_hopeless(arch):
+    from autotagtt import train
+    ids, X, pos = _weak_data(npos=35)
+    write_stars(arch, pos)
+    r = train.train_tag("braces", ids, X, top=300, force=True)
+    assert r["metrics"]["verdict"] == "hopeless" and r["suggestions"] == [] and r["metrics"]["review_only"] is False
+
+
+def test_feature_rule_uses_relative_gain_and_auc_for_rare_tags():
+    from autotagtt.train import _clearly_better
+    assert _clearly_better(0.0095, 0.78, 0.0067, 0.77)            # +42% AP and +0.01 AUC: counts for a rare tag
+    assert not _clearly_better(0.0095, 0.77, 0.0067, 0.77)        # relative AP alone, no AUC support: noise
+    assert _clearly_better(0.0058, 0.80, 0.0073, 0.77)            # a clear AUC gain is enough by itself
+    assert not _clearly_better(0.0058, 0.76, 0.0073, 0.77)        # worse on both
+    assert _clearly_better(0.50, 0.90, 0.40, 0.90)                # big absolute AP gain, as before
+    assert not _clearly_better(0.405, 0.905, 0.40, 0.90)
+
+
+def _text_data(n=900, npos=90, d=8, text_signal=True, frame_signal=False, seed=11):
+    rng = np.random.default_rng(seed)
+    ids = [f"v{i:05d}" for i in range(n)]
+    X = rng.normal(size=(n, 32)).astype(np.float32); X /= np.linalg.norm(X, axis=1, keepdims=True)    # covers say nothing
+    pidx = list(range(npos))
+    T = rng.normal(size=(n, d)).astype(np.float32)
+    if text_signal:
+        T[pidx] += 2.5
+    F = rng.normal(size=(n, 3 * d + 1)).astype(np.float32); F[:, -1] = 0
+    if frame_signal:
+        F[pidx, :2 * d] += 2.5
+    return ids, X, set(ids[:npos]), T.astype(np.float16), F.astype(np.float16)
+
+
+def test_captions_are_used_only_when_they_clearly_help(arch):
+    from autotagtt import train
+    ids, X, pos, T, F = _text_data(text_signal=True)
+    write_stars(arch, set(sorted(pos)[:70]))
+    tf = train.TextFeatures(ids, T, ids)
+    assert tf.ready and tf.coverage == 1.0
+    r = train.train_tag("braces", ids, X, top=30, tf=tf, force=True)
+    assert r["metrics"]["features"] == "text" and r["metrics"]["auc"] > 0.9 and "text" in r["metrics"]["feature_aucs"]
+    ids2, X2, pos2, T2, F2 = _text_data(text_signal=False)
+    write_stars(arch, set(sorted(pos2)[:70]))
+    assert train.train_tag("braces", ids2, X2, top=30, tf=train.TextFeatures(ids2, T2, ids2), force=True)["metrics"]["features"] == "cover"
+    # too few videos with captions: not used
+    sparse = train.TextFeatures(ids[:100], T[:100], ids)
+    assert sparse.ready is False and train._signature(None, sparse) == "cover"
+
+
+def test_frames_and_captions_together_when_each_helps(arch):
+    from autotagtt import train
+    ids, X, pos, T, F = _text_data(text_signal=True, frame_signal=True)
+    write_stars(arch, set(sorted(pos)[:70]))
+    ff = train.FrameFeatures(ids, F, ids, coverage=1.0)
+    tf = train.TextFeatures(ids, T, ids)
+    r = train.train_tag("braces", ids, X, top=30, ff=ff, tf=tf, force=True)
+    assert r["metrics"]["features"] in ("frames+text", "text", "frames") and r["metrics"]["auc"] > 0.95
+    assert set(r["metrics"]["feature_aucs"]) >= {"cover", "frames", "text"}
+
+
+def test_new_videos_are_scored_with_text_features(arch, cvspy):
+    from autotagtt import train
+    ids, X, pos, T, F = _text_data(text_signal=True)
+    write_stars(arch, set(sorted(pos)[:70]))
+    tf = train.TextFeatures(ids, T, ids)
+    first = train.train_tag("braces", ids, X, top=30, tf=tf)
+    assert first["metrics"]["features"] == "text"
+    n1 = cvspy["n"]
+    nids = ["new1", "new2", "new3"]
+    nX = np.random.default_rng(1).normal(size=(3, 32)).astype(np.float32)
+    nT = np.vstack([T.astype(np.float32)[:2] * 0 + 3.0, np.zeros((1, T.shape[1]), np.float32)])    # two captioned like positives, one with no caption
+    tf2 = train.TextFeatures(ids + nids[:2], np.vstack([T, nT[:2].astype(np.float16)]), ids + nids)
+    r = train.train_tag("braces", ids + nids, np.vstack([X, nX]), top=900, tf=tf2)
+    assert r["mode"] == "incremental" and cvspy["n"] == n1 and r["metrics"]["incremental_new"] == 3
+    sc = {s["id"]: s["score"] for s in r["suggestions"]}
+    assert sc["new1"] > sc["new3"] and sc["new2"] > sc["new3"]
+
+
+def test_load_and_embed_captions_privately(arch):
+    from autotagtt import text
+    from autotagtt.archive import write_json_atomic
+    importlib.reload(text)
+    caps = {"v1": "A secret caption about something", "v2": "x", "v3": "another one #tag", "v4": ""}
+    blob = base64.b64encode(gzip.compress(json.dumps(caps).encode())).decode()
+    (arch / "data/.appdata/db_texts.js").write_text(f'window.dbvd_base64="{blob}";')
+    assert text.load_captions() == {"v1": "A secret caption about something", "v3": "another one #tag"}   # too-short captions dropped
+    class E:
+        calls = 0
+        def encode(self, texts):
+            E.calls += 1
+            return np.ones((len(texts), 4), np.float32)
+    assert text.embed_texts(E(), ["v1", "v2", "v3", "v9"], "m", log=lambda *_: None) == 2
+    assert text.embed_texts(E(), ["v1", "v3"], "m", log=lambda *_: None) == 0 and E.calls == 1      # cached: nothing re-embedded
+    blob_all = b"".join(p.read_bytes() for p in (arch / "data/.appdata/autotag").rglob("*") if p.is_file())
+    assert b"secret caption" not in blob_all and b"another one" not in blob_all                   # raw captions are never written
+    (arch / "data/.appdata/db_texts.js").write_text("garbage")
+    assert text.load_captions() == {}                                                              # unreadable file: quietly no captions
+
+
+def test_summary_reports_verdict_and_features(wk):
+    from autotagtt.archive import write_json_atomic
+    write_json_atomic(wk.OUT / "autotag.json", {"_meta": {"metrics": {"t": {"positives": 90, "auc": 0.77, "gate": "weak", "verdict": "review_only",
+                       "review_only": True, "features": "cover", "ai_count": 0, "ai_mode": "off"}}}, "t": [{"id": "a"}] * 5})
+    s = wk.summarize()["t"]
+    assert s["verdict"] == "review_only" and s["review_only"] is True and s["features"] == "cover" and s["pending"] == 5
