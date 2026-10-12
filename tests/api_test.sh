@@ -96,9 +96,9 @@ chk "notify-test: too soon -> 429" "$(nt '{}')" 429
 chk "notify-test: status flag exposed" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["notifications"])')" True
 rm -f $AT/notify_test.json
 fp() { curl -s -o /tmp/at_body -w '%{http_code}' -X POST "$B/api/autotag/frames" -H 'Content-Type: application/json' "${@:2}" -d "$1"; }
-chk "frames: default config is off" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"])')" "{'mode': 'off', 'mouth': False, 'budget_min': 120}"
+chk "frames: default config is off" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"])')" "{'mode': 'off', 'mouth': False, 'text': True, 'budget_min': 120}"
 chk "frames: set trial" "$(fp '{"mode":"trial","mouth":true,"budget_min":60}')" 200
-chk "frames: read back" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"])')" "{'mode': 'trial', 'mouth': True, 'budget_min': 60}"
+chk "frames: read back" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"])')" "{'mode': 'trial', 'mouth': True, 'text': True, 'budget_min': 60}"
 chk "frames: file mode 600" "$(stat -f %Lp $AT/frames.json 2>/dev/null || stat -c %a $AT/frames.json)" 600
 chk "frames: budget defaults" "$(fp '{"mode":"full","mouth":false}')" 200
 chk "frames: bad mode -> 400" "$(fp '{"mode":"everything","mouth":false}')" 400
@@ -122,6 +122,24 @@ rm -f $AT/frames_progress.json
 chk "progress: absent file -> null" "$(fprog 'import sys,json;print(json.load(sys.stdin)["frames"]["progress"])')" None
 chk "progress: no paths in the status" "$(curl -s $B/api/autotag/run | grep -c '/mnt\\|/archive')" 0
 rm -f $AT/frames.json
+chk "frames: captions can be switched off" "$(fp '{"mode":"off","mouth":false,"text":false}')" 200
+chk "frames: captions flag read back" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["frames"]["config"]["text"])')" False
+chk "frames: text must be boolean -> 400" "$(fp '{"mode":"off","mouth":false,"text":"no"}')" 400
+rm -f $AT/frames.json
+# weak tags: review-only lists are listed and flagged, hopeless ones are hidden
+cp $AT/autotag.json /tmp/at_keep.json
+python3 - <<PY
+import json
+d={"_meta":{"metrics":{"braces":{"gate":"ok"},"scenery":{"gate":"weak","review_only":True,"verdict":"review_only"},"hopeless":{"gate":"weak","review_only":False,"verdict":"hopeless"}}},
+   "braces":[{"id":"7000000000000000009","score":2.0}],"scenery":[{"id":"7000000000000000030","score":0.5},{"id":"7000000000000000031","score":0.4}],"hopeless":[]}
+json.dump(d,open("$AT/autotag.json","w"))
+PY
+lc() { curl -s "$B/api/autotag?tag=$1" | python3 -c "$2"; }
+chk "weak: review-only tag is listed, hopeless is not" "$(lc braces 'import sys,json;d=json.load(sys.stdin);print(sorted(d["tags"]),d["lowConfidenceTags"],d["lowConfidence"])')" "['braces', 'scenery'] ['scenery'] False"
+chk "weak: low-confidence flag and its list" "$(lc scenery 'import sys,json;d=json.load(sys.stdin);print(d["lowConfidence"],len(d["pending"]))')" "True 2"
+chk "weak: feedback on a review-only suggestion works" "$(post '{"tag":"scenery","id":"7000000000000000030","decision":"rejected"}')" 200
+chk "weak: decided items leave the list" "$(lc scenery 'import sys,json;d=json.load(sys.stdin);print(len(d["pending"]),len(d["rejected"]))')" "1 2"
+cp /tmp/at_keep.json $AT/autotag.json
 # long silent job: status.json heartbeat is stale, but the worker's own heartbeat.json is fresh -> still online
 setst '{"state":"running","phase":"training","detail":"tag 3 of 11"}' 600
 chk "heartbeat: stale status alone -> offline" "$(curl -s $B/api/autotag/run | python3 -c 'import sys,json;print(json.load(sys.stdin)["workerOnline"])')" False

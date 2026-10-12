@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 import imageio_ffmpeg
 
 out, mtt = Path(sys.argv[1]), Path(sys.argv[2])
+viewer_js = Path(sys.argv[3]) if len(sys.argv) > 3 else mtt / "app.js"
 app = out / "data/.appdata"
 (out / "data/Likes/covers").mkdir(parents=True, exist_ok=True)
 (out / "data/Likes/videos").mkdir(parents=True, exist_ok=True)
@@ -35,6 +36,7 @@ db("following", "dbf", {"authorItems": {}, "officialAuthorList": [], "started": 
     {"id": "g-braces", "name": "Braces", "videoIds": ids[:4]},
     {"id": "g-other", "name": "scenery", "videoIds": ids[4:8]}]}))
 (app / "sessions.json").write_text(json.dumps({"sessions": []}))
+shutil.rmtree(app / "autotag", ignore_errors=True)      # always start from a clean slate (settings, status, caches)
 (app / "autotag").mkdir(exist_ok=True)
 (app / "autotag/autotag.json").write_text(json.dumps({
     "_meta": {"model": "synthetic", "generated": "2026-01-01T00:00:00"},
@@ -45,7 +47,7 @@ db("following", "dbf", {"authorItems": {}, "officialAuthorList": [], "started": 
     **{v: [["braces", round(3.0 - i * 0.2, 4)], ["scenery", round(2.0 - i * 0.1, 4)]] for i, v in enumerate(ids[8:22])},
     ids[4]: [["scenery", 1.0]], ids[0]: [["braces", 1.0]]}}))
 shutil.copy(mtt / "Archive.html", out / "Archive.html")
-shutil.copy(mtt / "app.js", app / "app.js")
+shutil.copy(viewer_js, app / "app.js")
 shutil.copy(mtt / "starplayer.js", app / "starplayer.js")
 for f in list(app.glob("autotag_feedback.json*")) + list(app.glob("autotag_tags.json*")):
     f.unlink()
