@@ -797,3 +797,24 @@ def test_summary_reports_verdict_and_features(wk):
                        "review_only": True, "features": "cover", "ai_count": 0, "ai_mode": "off"}}}, "t": [{"id": "a"}] * 5})
     s = wk.summarize()["t"]
     assert s["verdict"] == "review_only" and s["review_only"] is True and s["features"] == "cover" and s["pending"] == 5
+
+
+def test_optional_steps_never_fail_the_run(arch, monkeypatch, capsys):
+    from types import SimpleNamespace
+    for m in ("autotagtt.archive", "autotagtt.store", "autotagtt.train", "autotagtt.cli"):
+        importlib.reload(importlib.import_module(m))
+    from autotagtt import cli, text
+    from autotagtt.store import EmbStore
+    ids, X, pos = make_data(n=300, npos=45, d=32)
+    write_stars(arch, set(sorted(pos)[:40]))
+    EmbStore("m", "cover").add(ids, X)
+    # a missing library in the captions step (the real incident) and a crash in the frames step
+    def boom(*a, **k): raise ModuleNotFoundError("No module named 'transformers' /private/path")
+    monkeypatch.setattr(text, "embed_texts", boom)
+    monkeypatch.setattr(cli, "_frames_step", boom)
+    cli._train_and_write(SimpleNamespace(model="m", pretrained="p", top=20), ["braces"], ids, X, new_covers=0, with_frames=True)
+    out = capsys.readouterr().out
+    assert "captions: skipped (ModuleNotFoundError)" in out and "frames: skipped (ModuleNotFoundError)" in out
+    assert "/private/path" not in out and "transformers" not in out                    # error type only, never the message
+    from autotagtt.archive import OUT
+    assert (OUT / "autotag.json").exists() and json.loads((OUT / "run_summary.json").read_text())["modes"] == {"trained": 1}

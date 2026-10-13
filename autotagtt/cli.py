@@ -117,7 +117,10 @@ def _text_step(a, ids, process=True):
     if not frames_config()["text"]:
         return None
     if process:
-        embed_texts(LazyTextEmbedder(a.model, a.pretrained), ids, a.model)
+        try:
+            embed_texts(LazyTextEmbedder(a.model, a.pretrained), ids, a.model)
+        except Exception as e:      # captions are an optional extra: never let them fail the run (error type only, no details)
+            print(f"captions: skipped ({type(e).__name__}); continuing without new caption embeddings", flush=True)
     tids, T = EmbStore(a.model, "text").load()
     return TextFeatures(tids, T, ids) if len(tids) else None
 
@@ -125,7 +128,11 @@ def _text_step(a, ids, process=True):
 def _train_and_write(a, tags, ids, X, new_covers, with_frames):
     from .train import train_tag, write_suggestions, write_ai_tags
     t0 = time.time()
-    ff = _frames_step(a, ids, X, tags, process=with_frames)
+    try:
+        ff = _frames_step(a, ids, X, tags, process=with_frames)
+    except Exception as e:          # frames are optional too: fall back to covers (and whatever frames are already cached)
+        print(f"frames: skipped ({type(e).__name__}); continuing with covers only", flush=True)
+        ff = None
     tf = _text_step(a, ids, process=with_frames)
     lazy = _Lazy(X)
     res, modes = {}, {}
