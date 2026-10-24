@@ -5,6 +5,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 from .archive import OUT, APPDATA, load_groups, write_json_atomic, label
+from . import scorer
 
 FEEDBACK = APPDATA / "autotag_feedback.json"   # written by kashibox: {tag: {accepted:[], rejected:[]}}
 MIN_POSITIVES = 30                              # fewer reviewed/known positives than this: no model for the tag
@@ -264,6 +265,8 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
 
     meta, cache = (None, None) if force else _cache_load(tag)
     fresh = meta is not None and meta.get("fp") == fp and time.time() - meta.get("trained_at", 0) < MAX_AGE_S
+    if fresh and meta.get("status") == "model" and (meta.get("metrics") or {}).get("gate") == "ok" and not scorer.has_model(tag):
+        fresh = False                  # a usable tag needs its scorer model: retrain it once to create it
     if fresh and meta.get("status") == "skipped":
         print(f"[{label(tag)}] unchanged; skipped (needs {MIN_POSITIVES} positives)", flush=True)
         return None
@@ -295,13 +298,14 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     skf = StratifiedGroupKFold(folds, shuffle=True, random_state=seed)
     splits = list(skf.split(X, y, grp))
 
-    feat, aps, aucs = "cover", {}, {}
+    feat, aps, aucs, quick_oof = "cover", {}, {}, {}
     singles = (ff.kinds() if ff is not None else []) + (["text"] if tf is not None and tf.ready else [])
     if singles:
         quick = list(StratifiedGroupKFold(3, shuffle=True, random_state=seed).split(X, y, grp))
 
         def quick_eval(kind):
             o = _cv(_features(kind, ids, X, ff, tf), y, w, quick, cs[0])
+            quick_oof[kind] = o
             aps[kind], aucs[kind] = float(average_precision_score(y, o)), float(roc_auc_score(y, o))
 
         for kind in ["cover"] + singles:
@@ -349,9 +353,36 @@ def train_tag(tag, ids, X, top=300, folds=5, cs=(0.001, 0.01, 0.1), seed=0, grp=
     sc, clf = _fit(Xf, y, w, C)
     wt, b = _linear(sc, clf)
     _cache_save(tag, {"status": "model", "fp": fp, "trained_at": time.time(), "features": feat, "metrics": metrics}, ids, oof, wt, b)
+    if metrics["gate"] == "ok":
+        try:
+            _save_scorer(tag, X, y, w, ids, idx, feat, oof, quick_oof.get("cover"), wt, b, cs[0], metrics, accepted, rejected)
+        except Exception as e:     # the scorer is an extra: never let it fail a training run (error type only)
+            print(f"  scorer model not saved ({type(e).__name__})", flush=True)
     out = _outputs(tag, ids, oof, pos_ids, accepted, rejected, unsure, metrics, top)
     out["mode"] = "trained"
     return out
+
+
+def _save_scorer(tag, X, y, w, ids, idx, feat, oof, cover_oof, wt, b, c0, metrics, accepted, rejected):
+    """Cover-only classifier + calibration + weight for the scorer service (a bare cover has no frames or caption)."""
+    if feat == "cover":
+        wc, bc, d_oof = wt, b, oof
+    else:
+        sc2, clf2 = _fit(X, y, w, c0)
+        wc, bc = _linear(sc2, clf2)
+        d_oof = cover_oof
+    acc = [v for v in accepted if v in idx]
+    rej = [v for v in rejected if v in idx]
+    calib = None
+    if d_oof is not None and len(acc) >= scorer.CAL_MIN and len(rej) >= scorer.CAL_MIN:
+        calib = scorer.platt_fit([d_oof[idx[v]] for v in acc], [d_oof[idx[v]] for v in rej])
+    weight, source = scorer.tag_weight(metrics, len(acc), len(rej))
+    if feat != "cover" and d_oof is not None:
+        # The service only sees a cover, so it uses the cover-only classifier: never weight it above what covers alone achieve
+        top = y[np.argsort(-d_oof)][:100]
+        weight, source = min(weight, float(top.mean())), source + "+cover-cap"
+    scorer.save_tag_model(tag, wc, bc, calib, weight, source, {"reviewed": len(acc) + len(rej), "features": feat})
+    print(f"  scorer: weight={weight:.2f} ({source}) calibration={'platt' if calib else 'class-balanced'}", flush=True)
 
 
 def _reuse(tag, meta, cache, cur_ids, Xcur, ff, tf, new_idx, pos_ids, accepted, rejected, unsure, top):

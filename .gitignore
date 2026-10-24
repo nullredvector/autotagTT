@@ -14,3 +14,4 @@ emb/
 data/
 models/
 .env
+.DS_Store

@@ -8,7 +8,7 @@ import pytest
 def arch(tmp_path, monkeypatch):
     monkeypatch.setenv("ARCHIVE_DIR", str(tmp_path))
     (tmp_path / "data/.appdata").mkdir(parents=True)
-    for m in ("autotagtt.archive", "autotagtt.store", "autotagtt.train"):
+    for m in ("autotagtt.archive", "autotagtt.store", "autotagtt.scorer", "autotagtt.train", "autotagtt.serve"):
         importlib.reload(importlib.import_module(m))
     return tmp_path
 
@@ -818,3 +818,235 @@ def test_optional_steps_never_fail_the_run(arch, monkeypatch, capsys):
     assert "/private/path" not in out and "transformers" not in out                    # error type only, never the message
     from autotagtt.archive import OUT
     assert (OUT / "autotag.json").exists() and json.loads((OUT / "run_summary.json").read_text())["modes"] == {"trained": 1}
+
+
+
+# ───────────── scorer: saved classifiers, calibration, noisy OR, HTTP service ─────────────
+import http.client, io, threading, time as _time
+from http.server import ThreadingHTTPServer
+from PIL import Image
+
+
+def _models(arch, specs):
+    """specs: {tag: (w, b, weight, calib)} -> manifest written, ModelSet loaded."""
+    from autotagtt import scorer
+    for tag, (w, b, weight, calib) in specs.items():
+        scorer.save_tag_model(tag, np.array(w, np.float32), b, calib, weight, "test")
+    scorer.write_manifest(list(specs))
+    ms = scorer.ModelSet()
+    ms.load()
+    return scorer, ms
+
+
+def test_noisy_or_with_known_weights(arch):
+    scorer, ms = _models(arch, {"a": ([5, 0, 0, 0], 0.0, 0.9, None), "b": ([0, 0, 0, 0], 0.0, 0.5, None)})
+    score, tags, probs = ms.score([1, 0, 0, 0])
+    pa, pb = 1 / (1 + np.exp(-5.0)), 0.5
+    assert score == round(1 - (1 - 0.9 * pa) * (1 - 0.5 * pb), 4)
+    assert tags == [["a", round(0.9 * pa, 4)], ["b", 0.25]] and probs == {"a": round(pa, 4), "b": 0.5}
+    only_strong, _, _ = ms.score([1, 0, 0, 0])
+    assert only_strong > 0.9 * pa                                   # a second tag adds to one strong match
+
+
+def test_calibrated_tag_uses_its_platt_curve_and_best_three_are_returned(arch):
+    scorer, ms = _models(arch, {"cal": ([1, 0, 0, 0], 0.0, 1.0, {"a": 2.0, "c": -1.0}),
+                                "t1": ([0, 1, 0, 0], 0.0, 0.8, None), "t2": ([0, 0, 1, 0], 0.0, 0.6, None), "t3": ([0, 0, 0, 1], 0.0, 0.4, None)})
+    score, tags, probs = ms.score([1, 0, 0, 0])
+    assert probs["cal"] == round(1 / (1 + np.exp(-(2 * 1 - 1))), 4)
+    assert len(tags) == 3 and tags[0][0] == "cal"                    # best three by weight * probability
+
+
+def test_low_weight_tags_are_dropped_from_the_manifest_and_the_model_id_tracks_content(arch):
+    scorer, ms = _models(arch, {"keep": ([1, 0, 0, 0], 0.0, 0.9, None), "weak": ([1, 0, 0, 0], 0.0, 0.2, None)})
+    man = json.loads((scorer.MODELS / "manifest.json").read_text())
+    assert [t["tag"] for t in man["tags"]] == ["keep"]
+    id1 = man["model"]
+    scorer.write_manifest(["keep", "weak"])
+    assert json.loads((scorer.MODELS / "manifest.json").read_text())["model"] == id1       # unchanged content: same id
+    scorer.save_tag_model("keep", np.array([2, 0, 0, 0], np.float32), 0.0, None, 0.9, "test")
+    scorer.write_manifest(["keep"])
+    id2 = json.loads((scorer.MODELS / "manifest.json").read_text())["model"]
+    assert id2 != id1 and len(id2.split("-")[-1]) == 6              # new weights: new id
+
+
+def test_training_saves_models_only_for_usable_tags_with_weight_and_calibration(arch):
+    from autotagtt import train, scorer
+    from types import SimpleNamespace
+    ids, X, pos = make_data(n=900, npos=90, d=32)
+    rng = np.random.default_rng(8)
+    noise = set(rng.choice(ids[120:], 60, replace=False).tolist())
+    write_multi(arch, {"braces": set(sorted(pos)[:60]), "noise": noise})
+    hidden = sorted(pos - set(sorted(pos)[:60]))
+    fb = {"braces": {"accepted": hidden[:25], "rejected": [v for v in ids[400:425]]}}
+    (arch / "data/.appdata/autotag_feedback.json").write_text(json.dumps(fb))
+    good = train.train_tag("braces", ids, X, top=30)
+    bad = train.train_tag("noise", ids, X, top=30)
+    assert good["metrics"]["gate"] == "ok" and bad["metrics"]["gate"] == "weak"
+    assert scorer.has_model("braces") and not scorer.has_model("noise")                # weak tags get no scorer model
+    meta = json.loads((scorer.MODELS / f"{scorer.tag_key('braces')}.json").read_text())
+    assert meta["weight_source"] == "reviewed" and abs(meta["weight"] - 25 / 50) < 1e-6     # 25 accepted of 50 reviewed
+    assert meta["calib"] and meta["calib"]["a"] > 0                                    # 25 + 25 reviews: Platt calibration
+    z = np.load(scorer.MODELS / f"{scorer.tag_key('braces')}.npz")
+    assert z["w"].shape == (32,)
+    # few reviews: class-balanced fallback weighted by cross-validated precision
+    (arch / "data/.appdata/autotag_feedback.json").write_text(json.dumps({"braces": {"accepted": hidden[:5], "rejected": ids[400:405]}}))
+    train.train_tag("braces", ids, X, top=30)
+    meta2 = json.loads((scorer.MODELS / f"{scorer.tag_key('braces')}.json").read_text())
+    assert meta2["weight_source"] == "cv" and meta2["calib"] is None and 0 < meta2["weight"] <= 1
+
+
+def test_tag_whose_scorer_model_is_missing_is_retrained_once(arch, cvspy):
+    from autotagtt import train, scorer
+    ids, X, pos = make_data(n=600, npos=60, d=32)
+    write_stars(arch, set(sorted(pos)[:45]))
+    train.train_tag("braces", ids, X, top=20)
+    assert train.train_tag("braces", ids, X, top=20)["mode"] == "reused"
+    (scorer.MODELS / f"{scorer.tag_key('braces')}.npz").unlink()
+    assert train.train_tag("braces", ids, X, top=20)["mode"] == "trained" and scorer.has_model("braces")
+
+
+class _Emb:
+    """Fake embedder: the image's mean red/green/blue become the first three components."""
+    def encode(self, imgs):
+        out = []
+        for im in imgs:
+            a = np.asarray(im.resize((4, 4))).reshape(-1, 3).mean(0) / 255.0
+            v = np.array([a[0], a[1], a[2], 0.0], np.float32)
+            out.append(v / (np.linalg.norm(v) + 1e-9))
+        return np.array(out, np.float32)
+
+
+def _img_bytes(fmt="JPEG", size=(32, 48), color=(250, 10, 10)):
+    b = io.BytesIO()
+    Image.new("RGB", size, color).save(b, fmt)
+    return b.getvalue()
+
+
+@pytest.fixture
+def svc(arch):
+    from autotagtt import serve, scorer
+    scorer_, ms = _models(arch, {"red": ([8, -4, -4, 0], 0.0, 0.9, None)})
+    service = serve.Service(models=ms, scores_log=serve.ScoresLog(keep=50, slack=10))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(service))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    def call(method, path, body=None, headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request(method, path, body=body, headers=headers or {})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, json.loads(data or b"{}")
+    yield service, call
+    server.shutdown()
+
+
+def test_service_health_loading_and_score_shape(svc):
+    service, call = svc
+    code, h = call("GET", "/health")
+    assert code == 200 and h["ok"] is True and h["ready"] is False and h["tags"] == 1 and h["model"]
+    assert call("POST", "/score?id=abc", _img_bytes())[0] == 503                     # model still loading
+    service.set_embedder(_Emb())
+    assert call("GET", "/health")[1]["ready"] is True
+    for fmt in ("JPEG", "PNG", "WEBP"):
+        code, r = call("POST", "/score?id=vid_1", _img_bytes(fmt))
+        assert code == 200 and set(r) == {"score", "tags", "model"} and 0 <= r["score"] <= 1
+        assert r["tags"][0][0] == "red" and r["model"] == h["model"]
+    red = call("POST", "/score?id=r", _img_bytes(color=(250, 10, 10)))[1]["score"]
+    blue = call("POST", "/score?id=b", _img_bytes(color=(10, 10, 250)))[1]["score"]
+    assert red > blue                                                                 # a red cover fits the red tag better
+    assert call("GET", "/nope")[0] == 404 and call("POST", "/nope", b"x")[0] == 404
+
+
+def test_service_limits_and_bad_input(svc):
+    service, call = svc
+    service.set_embedder(_Emb())
+    assert call("POST", "/score?id=a", b"not an image")[0] == 400                    # undecodable
+    assert call("POST", "/score?id=a", _img_bytes()[:40])[0] == 400                   # truncated file
+    assert call("POST", "/score?id=a", b"")[0] == 400
+    assert call("POST", "/score?id=../x", _img_bytes())[0] == 400 and call("POST", "/score", _img_bytes())[0] == 400
+    gif = io.BytesIO(); Image.new("RGB", (8, 8)).save(gif, "GIF")
+    assert call("POST", "/score?id=a", gif.getvalue())[0] == 400                      # only JPEG/PNG/WebP
+    big = io.BytesIO(); Image.new("1", (5000, 5000)).save(big, "PNG")                 # tiny file, 25 megapixels
+    assert len(big.getvalue()) < 2 * 1024 * 1024 and call("POST", "/score?id=a", big.getvalue())[0] == 413
+    code, _ = call("POST", "/score?id=a", b"x" * (2 * 1024 * 1024 + 1))               # over 2 MB
+    assert code == 413
+
+
+def test_service_picks_up_a_new_model_without_restart_and_logs_scores(svc, arch):
+    from autotagtt import scorer
+    service, call = svc
+    service.set_embedder(_Emb())
+    r1 = call("POST", "/score?id=first_id", _img_bytes())[1]
+    scorer.save_tag_model("red", np.array([8, -4, -4, 0], np.float32), 0.0, None, 0.5, "test")      # retrained: lower weight
+    _time.sleep(0.02)
+    scorer.write_manifest(["red"])
+    r2 = call("POST", "/score?id=second_id", _img_bytes())[1]
+    assert r2["model"] != r1["model"] and r2["score"] < r1["score"]
+    lines = [json.loads(l) for l in service.log.path.read_text().splitlines()]
+    assert [l["id"] for l in lines] == ["first_id", "second_id"]
+    assert set(lines[0]) == {"id", "ts", "p", "score"} and "red" in lines[0]["p"] and lines[0]["score"] == r1["score"]
+    assert stat.S_IMODE(os.stat(service.log.path).st_mode) == 0o600
+
+
+def test_scores_log_is_rotated_keeping_the_newest(arch):
+    from autotagtt import serve
+    log = serve.ScoresLog(keep=50, slack=10)
+    for i in range(130):
+        log.append({"id": f"id{i}", "ts": i, "p": {}, "score": 0.1})
+        assert log.count <= 61 and len(log.path.read_text().splitlines()) <= 61
+    ids = [json.loads(l)["id"] for l in log.path.read_text().splitlines()]
+    assert ids[-1] == "id129" and "id0" not in ids and len(ids) >= 50
+    assert serve.ScoresLog(keep=50, slack=10).count == len(ids)                      # a restart counts what is already there
+
+
+def test_worker_keeps_the_scorer_service_running(wk, monkeypatch):
+    from autotagtt import worker
+    importlib.reload(worker)
+    class P:
+        def __init__(self, *a, **k): P.n += 1; self.alive = True
+        def poll(self): return None if self.alive else 1
+    P.n = 0
+    monkeypatch.setattr(worker.subprocess, "Popen", P)
+    worker._serve.update(proc=None, started=0.0)
+    worker.supervise_serve()
+    assert P.n == 1
+    worker.supervise_serve()                                  # still running: nothing new
+    assert P.n == 1
+    worker._serve["proc"].alive = False
+    worker.supervise_serve()                                  # died, but restarts are rate-limited to one per 30 s
+    assert P.n == 1
+    worker._serve["started"] -= 31
+    worker.supervise_serve()
+    assert P.n == 2
+
+
+def test_scorer_artifacts_reproduce_the_ranking_and_load_into_the_service(arch):
+    from autotagtt import cli, scorer, train
+    from types import SimpleNamespace
+    ids, X, pos = make_data(n=900, npos=90, d=32)
+    rng = np.random.default_rng(8)
+    noise = set(rng.choice(ids[120:], 60, replace=False).tolist())
+    write_multi(arch, {"braces": set(sorted(pos)[:60]), "noise": noise, "other": set(sorted(pos)[:50])})
+    cli._train_and_write(SimpleNamespace(model="m", pretrained="p", top=20), ["braces", "noise"], ids, X, new_covers=0, with_frames=False)
+    man = json.loads((scorer.MODELS / "manifest.json").read_text())
+    assert [t["tag"] for t in man["tags"]] == ["braces"]                      # weak "noise" excluded; "other" was not enabled/trained
+    ms = scorer.ModelSet(); ms.load()
+    assert ms.model_id == man["model"]
+    inside = np.mean([ms.score(X[i])[0] for i in range(60, 90)])               # true positives the user has not tagged
+    outside = np.mean([ms.score(X[i])[0] for i in range(300, 330)])
+    assert 0.3 < inside <= max(t["weight"] for t in man["tags"]) + 1e-6 and inside > outside + 0.25   # a score never exceeds the tag weight
+
+
+def test_tag_rescued_only_by_frames_gets_a_capped_weight_and_a_cover_only_model(arch):
+    from autotagtt import train, scorer
+    ids, X, pos, F = _frame_data(frame_signal=True)                            # covers carry no signal, frames do
+    write_stars(arch, set(sorted(pos)[:45]))
+    ff = train.FrameFeatures(ids, F.astype(np.float16), ids, coverage=1.0)
+    r = train.train_tag("braces", ids, X, top=30, ff=ff, force=True)
+    assert r["metrics"]["features"] == "frames" and r["metrics"]["gate"] == "ok"
+    meta = json.loads((scorer.MODELS / f"{scorer.tag_key('braces')}.json").read_text())
+    assert np.load(scorer.MODELS / f"{scorer.tag_key('braces')}.npz")["w"].shape == (X.shape[1],)   # covers only: no frame columns
+    assert meta["weight_source"].endswith("+cover-cap") and meta["weight"] < 0.3         # covers alone know almost nothing here
+    scorer.write_manifest(["braces"])
+    assert json.loads((scorer.MODELS / "manifest.json").read_text())["tags"] == []        # so it is dropped from scoring

@@ -83,3 +83,18 @@ Per-tag caches live in `data/.appdata/autotag/cache/<hash>/` (hashed names, owne
 - **Disable the feature:** stop the worker container (kashibox shows "worker offline"; existing suggestions and AI tags stay). To remove AI tags, delete `autotag/ai_tags.json`.
 - **Roll back:** pin the previous `:<sha>` image tag; `.bak` copies of `autotag.json` and `ai_tags.json` are kept; delete `autotag/cache/` if scores look wrong.
 - **Recover from a crash:** nothing needs cleaning up. Writes are atomic, finished tags and frame batches are already cached, and the next run continues from there.
+
+## Scorer service (for the scout)
+`python -m autotagtt serve` (started and kept running by the worker; `AUTOTAGTT_SERVE=0` turns it off) answers *"how well does this
+cover fit the tags I taught you?"* over HTTP on port 8090, **inside the compose network only** (`expose`, never `ports`; there is no login).
+
+- `POST /score?id=<video id>` with the raw image (JPEG/PNG/WebP, at most 2 MB and 16 megapixels; bad ids/images -> 400, too big -> 413, still loading -> 503) returns
+  `{"score": 0..1, "tags": [[name, value], ...best three], "model": "<date>-<hash>"}`. `GET /health` returns `{"ok", "ready", "model", "tags"}`.
+- **Models:** each run saves, per *usable* tag (enabled, trained, not weak/review-only), a cover-only classifier with its calibration and weight under
+  `data/.appdata/autotag/models/` (owner-only, tag names inside, never commit). The service reloads when `manifest.json` changes: no restart after a nightly run.
+  A tag that frames made usable is scored by its cover-only classifier with its weight capped by what covers alone achieve.
+- **Score:** `1 - prod(1 - w_t * p_t)`. `p_t` is Platt-calibrated on out-of-fold values against your accepts/rejects (at least 20 of each), else the class-balanced
+  logistic output (optimistic: negatives are provisional). `w_t` is the tag's reviewed precision (at least 30 reviews) else its cross-validated precision at the top; tags under 0.3 are dropped.
+- **Score log:** every score is appended to `autotag/scout_scores.jsonl` (`{id, ts, p, score}`, newest 20,000 lines kept, owner-only), so a later decision can be joined to what produced it.
+- A tag with no scorer model yet (first run after this was added) is retrained once to create it.
+- Not built yet: learning a stacker from `scout_feedback.json` (needs that file's format).

@@ -7,7 +7,7 @@ def main():
     os.umask(0o077)   # everything we create is owner-only
     ap = argparse.ArgumentParser(prog="autotagtt")
     sub = ap.add_subparsers(dest="cmd")
-    for name in ("embed", "train", "run", "montage", "worker", "notify-test"):
+    for name in ("embed", "train", "run", "montage", "worker", "notify-test", "serve"):
         p = sub.add_parser(name)
         p.add_argument("--model", default=DEFAULT_MODEL)
         p.add_argument("--pretrained", default=DEFAULT_PRETRAINED)
@@ -20,6 +20,9 @@ def main():
         from . import notify
         print("sent" if notify.notify("test", "autotagTT: test notification", "If you can read this, notifications are working.", tags=["bell"]) else "not sent (is NTFY_URL set?)")
         return
+    if cmd == "serve":
+        from .serve import main as serve_main
+        return serve_main()
     if cmd == "worker":
         from .worker import main as worker_main
         return worker_main()
@@ -145,6 +148,13 @@ def _train_and_write(a, tags, ids, X, new_covers, with_frames):
         raise SystemExit("no tag could be trained")
     write_suggestions(res, a.model, a.pretrained)
     write_ai_tags(res, a.model)
+    try:
+        from . import scorer
+        usable = [t for t, r in res.items() if r["metrics"].get("verdict") == "usable"]
+        model_id, n = scorer.write_manifest(usable)
+        print(f"scorer: model {model_id} with {n} tags", flush=True)
+    except Exception as e:
+        print(f"scorer: manifest not written ({type(e).__name__})", flush=True)
     changed = bool(new_covers) or modes.get("trained", 0) > 0 or modes.get("incremental", 0) > 0
     write_json_atomic(OUT / "run_summary.json", {"changed": changed, "new_covers": new_covers, "modes": modes,
                                                  "frames_used": bool(ff and ff.ready), "text_used": bool(tf and tf.ready), "seconds": round(time.time() - t0)})

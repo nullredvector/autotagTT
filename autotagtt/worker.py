@@ -64,6 +64,21 @@ def summarize():
     return out
 
 
+SERVE = os.environ.get("AUTOTAGTT_SERVE", "1") != "0"          # the scorer service runs in this container too
+_serve = {"proc": None, "started": 0.0}
+
+
+def supervise_serve():
+    """Keep `python -m autotagtt serve` running (restart if it dies, at most every 30 s)."""
+    p = _serve["proc"]
+    if p is not None and p.poll() is None:
+        return
+    if time.time() - _serve["started"] < 30:
+        return
+    _serve["started"] = time.time()
+    _serve["proc"] = subprocess.Popen([sys.executable, "-m", "autotagtt", "serve"], env=dict(os.environ))
+
+
 def heartbeat_loop(interval=10.0):
     while True:
         try:
@@ -193,6 +208,11 @@ def main():
     print("worker ready", flush=True)
     beat = 0.0
     while True:
+        if SERVE:
+            try:
+                supervise_serve()
+            except Exception:
+                pass
         try:
             ran = tick(st)
         except Exception as e:                         # never die; report and keep polling
